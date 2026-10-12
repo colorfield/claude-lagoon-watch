@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { buildState, environments, failedRead, generatedSuffix, isBaseline, isLoginError, lagoonCommand, lagoonTime, parseRaw, projectOf, services, simpleCommands } from '../hooks/lagoon'
+import { buildState, environments, failedRead, generatedSuffix, isBaseline, gitUrlCandidates, isLoginError, lagoonCommand, lagoonTime, parseRaw, projectOf, services, simpleCommands } from '../hooks/lagoon'
 import { clusterComponent, platform, windowText, zoneOf } from '../hooks/status'
 import type { LagoonSnapshot } from '../types'
 
@@ -115,6 +116,9 @@ describe('lagoon', () => {
     expect(on('timeout 60 drush @lagoon.acme-stage uli')).toEqual({ environment: 'stage', summary: 'drush uli' })
     expect(on('direnv exec . devbox run -- lagoon ssh -e dev -- drush status')).toEqual({ environment: 'dev', summary: 'lagoon ssh: drush status' })
     expect(on('drush @lagoon.acme-stage uli')).toEqual({ environment: 'stage', summary: 'drush uli' })
+    // Another project whose name starts like this one's.
+    expect(lagoonCommand('drush @lagoon.acme-intranet-production cr', 'acme', ['dev', 'production'])).toBeUndefined()
+    expect(lagoonCommand('drush @lagoon.acme-production cr', 'acme', ['dev', 'production'])).toEqual({ environment: 'production', summary: 'drush cr' })
     expect(on('/opt/homebrew/bin/lagoon list deployments -p acme -e dev')).toEqual({ environment: 'dev', summary: 'lagoon list deployments' })
   })
 
@@ -203,7 +207,17 @@ describe('status page', () => {
   test('knows a login problem when it reads one', () => {
     expect(isLoginError('Error: token expired')).toBe(true)
     expect(isLoginError('ssh: handshake failed: ssh: unable to authenticate, attempted methods [none publickey]')).toBe(true)
+    expect(isLoginError('Permission denied (publickey).')).toBe(true)
     expect(isLoginError('Error: 504 Gateway Timeout')).toBe(false)
+    // An outage ssh reports is no login problem.
+    expect(isLoginError('ssh: connect to host ssh.lagoon.example port 32222: Operation timed out')).toBe(false)
+  })
+
+  test('never sends a remote with its credentials, and tries its other form', () => {
+    expect(gitUrlCandidates('https://x-access-token:ghp_secret@github.com/o/acme.git'))
+      .toEqual(['https://github.com/o/acme.git', 'git@github.com:o/acme.git'])
+    expect(gitUrlCandidates('git@github.com:o/acme.git')).toEqual(['git@github.com:o/acme.git', 'https://github.com/o/acme.git'])
+    expect(gitUrlCandidates('git@github.com:o/acme.git" } evil { "')).toEqual([])
   })
 })
 
@@ -218,15 +232,19 @@ const PANE = { plugin: 'lagoon-watch', component: 'Pane', requestId: 'lagoon-wat
 const run = (stdout: string, exitCode = 0, stderr = '') =>
   ({ value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false } })
 
-// A repo at /repo whose .lagoon.yml names no project; `answer` plays the lagoon CLI.
-function machine(on: On, answer: (query: string) => ReturnType<typeof run> | 'missing') {
-  const seen = { toasts: 0, status: [] as (string | undefined)[] }
-  on('session.root', () => ({ value: '/repo' }))
-  on('session.repo', () => ({ value: { root: '/repo', remote: 'git@github.com:o/acme.git', internal: false, name: null } }))
-  on('fs.exists', () => ({ value: true }))
-  on('fs.read', () => ({ value: YML.replace("project: 'acme'\n", '') }))
+// The machine the mod runs on: a repo at `world.root`, whose .lagoon.yml
+// names no project unless `world.project` is set; `answer` plays the lagoon CLI.
+type World = { root: string; project?: string; hasYml: boolean; remote: string | null; isHanging: boolean }
+
+function machine(on: On, answer: (query: string) => ReturnType<typeof run> | 'missing', world: World = { root: '/repo', hasYml: true, remote: 'git@github.com:o/acme.git', isHanging: false }) {
+  const seen = { toasts: 0, status: [] as (string | undefined)[], queries: [] as string[] }
+  on('session.root', () => ({ value: world.root }))
+  on('session.repo', () => ({ value: world.remote === null ? null : { root: world.root, remote: world.remote, internal: false, name: null } }) as never)
+  on('fs.exists', () => ({ value: world.hasYml }))
+  on('fs.read', () => ({ value: world.project === undefined ? YML.replace("project: 'acme'\n", '') : YML.replace("project: 'acme'", `project: '${world.project}'`) }))
   on('clock.now', () => ({ value: SNAPSHOT.fetchedAt! }))
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.panes', () => ({ value: [] }) as never)
   on('ui.toast', () => { seen.toasts += 1; return { value: undefined } })
   on('ui.status', ($, e) => { seen.status.push(e.text); return { value: undefined } })
   on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: SUMMARY } }) as never)
@@ -234,7 +252,10 @@ function machine(on: On, answer: (query: string) => ReturnType<typeof run> | 'mi
   on('process.run', ($, e) => {
     if (e.argv[0] === 'git') return run('stage\n')
     if (e.argv[1] === 'config') return run('example\n')
-    const result = answer(e.argv.at(-1) ?? '')
+    if (world.isHanging) return new Promise<never>(() => {})
+    const query = e.argv.at(-1) ?? ''
+    seen.queries.push(query)
+    const result = answer(query)
     if (result === 'missing') throw new Error('spawn lagoon ENOENT')
     return result
   })
@@ -243,18 +264,25 @@ function machine(on: On, answer: (query: string) => ReturnType<typeof run> | 'mi
 
 const FOUND = JSON.stringify({ projectByGitUrl: { name: 'acme' } })
 const READ = JSON.stringify({ me: { email: 'dev@example.com' }, projectByName: PROJECT })
+const lagoonCli = (query: string) => run(query.includes('projectByGitUrl') ? FOUND : READ)
+
+// /lagoon, then a Refresh press, which settles once the read is done.
+async function openPane($: Engine, surface: 'terminal' | 'desktop' = 'terminal') {
+  await $.command.run({ command: 'lagoon', args: '' } as never)
+  const ui = await $.ui.mount({ ...PANE, surface })
+  await ui.press({ key: 'refresh' })
+  return ui
+}
 
 describe('pane', () => {
   test('draws each environment with its build and services', async ($, on) => {
-    machine(on, query => run(query.includes('projectByGitUrl') ? FOUND : READ))
-    await $.command.run({ command: 'lagoon', args: '' } as never)
+    machine(on, lagoonCli)
     for (const surface of ['terminal', 'desktop'] as const) {
-      const ui = await $.ui.mount({ ...PANE, surface })
+      const ui = await openPane($, surface)
       expect(await ui.find({ type: 'Link', text: 'build log' })).toBeDefined()
       expect(await ui.find({ type: 'Link', text: 'dashboard' })).toBeDefined()
       expect(await ui.find({ text: /● applyingDeployments · 4m09s/ })).toBeDefined()
       expect(await ui.find({ type: 'Link', text: 'search' })).toBeDefined()
-      expect(await ui.find({ type: 'Button', key: 'refresh' })).toBeDefined()
       expect(await ui.find({ text: /dev@example\.com · example/ })).toBeDefined()
       expect(await ui.find({ type: 'Link', text: 'Example Hosting' })).toBeDefined()
       expect(await ui.find({ text: /ch1\.lagoon \(this project\): maintenance/ })).toBeDefined()
@@ -268,9 +296,8 @@ describe('pane', () => {
 
   test('a failed lookup shows why, and Refresh recovers once the CLI works', async ($, on) => {
     let isLoggedIn = false
-    machine(on, query => !isLoggedIn ? run('', 1, 'Error: token expired') : run(query.includes('projectByGitUrl') ? FOUND : READ))
-    await $.command.run({ command: 'lagoon', args: '' } as never)
-    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    machine(on, query => !isLoggedIn ? run('', 1, 'Error: token expired') : lagoonCli(query))
+    const ui = await openPane($)
     expect(await ui.find({ text: /Could not find the Lagoon project: Error: token expired/ })).toBeDefined()
     expect(await ui.find({ text: /Not logged in to Lagoon \(example\)/ })).toBeDefined()
     expect(await ui.find({ text: /lagoon login/ })).toBeDefined()
@@ -282,13 +309,28 @@ describe('pane', () => {
     await ui.unmount()
   })
 
+  test('an outage is shown as such, not as a login problem', async ($, on) => {
+    machine(on, query => query.includes('projectByGitUrl') ? run(FOUND) : run('', 1, 'ssh: connect to host ssh.lagoon.example port 32222: Operation timed out'))
+    const ui = await openPane($)
+    expect(await ui.find({ text: /lagoon: ssh: connect to host/ })).toBeDefined()
+    expect(await ui.find({ text: /Not logged in/ })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('only sends the remote without its credentials', async ($, on) => {
+    const seen = machine(on, lagoonCli, { root: '/repo', hasYml: false, remote: 'https://bot:ghp_secret@github.com/o/acme.git', isHanging: false })
+    const ui = await openPane($)
+    expect(seen.queries.some(query => query.includes('ghp_secret'))).toBe(false)
+    expect(seen.queries[0]).toContain('"https://github.com/o/acme.git"')
+    await ui.unmount()
+  })
+
   test("shows the command Claude last ran on an environment, and how it went", async ($, on) => {
-    machine(on, query => run(query.includes('projectByGitUrl') ? FOUND : READ))
+    machine(on, lagoonCli)
     let isFailing = true
     on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false }, text: 'ok', isError: isFailing }) as never)
-    await $.command.run({ command: 'lagoon', args: '' } as never)
+    const ui = await openPane($)
     await $.tool.call({ tool: 'Bash', command: 'lagoon ssh -p acme -e production -- drush cr' })
-    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
     expect(await ui.find({ text: /◆ Claude → production · 0s ago · ✗ failed/ })).toBeDefined()
     expect(await ui.find({ text: 'lagoon ssh: drush cr' })).toBeDefined()
 
@@ -299,10 +341,49 @@ describe('pane', () => {
     await ui.unmount()
   })
 
+  test("after a /cd to another Lagoon project, Claude's last command there is not shown", async ($, on) => {
+    const world: World = { root: '/repo', project: 'acme', hasYml: true, remote: null, isHanging: false }
+    machine(on, lagoonCli, world)
+    on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false }, text: 'ok' }) as never)
+    const ui = await openPane($)
+    await $.tool.call({ tool: 'Bash', command: 'lagoon ssh -e production -- drush cr' })
+    expect(await ui.find({ text: /◆ Claude → production/ })).toBeDefined()
+
+    Object.assign(world, { root: '/globex', project: 'globex' })
+    await ui.press({ key: 'refresh' })
+    expect(await ui.find({ text: /globex/ })).toBeDefined()
+    expect(await ui.find({ text: /◆ Claude →/ })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test("after a /cd to a repo with no Lagoon project, no cluster is called this project's", async ($, on) => {
+    const world: World = { root: '/repo', project: 'acme', hasYml: true, remote: null, isHanging: false }
+    machine(on, lagoonCli, world)
+    const ui = await openPane($)
+    expect(await ui.find({ text: /\(this project\)/ })).toBeDefined()
+
+    Object.assign(world, { root: '/plain', project: undefined, hasYml: false })
+    await ui.press({ key: 'refresh' })
+    expect(await ui.find({ text: /No \.lagoon\.yml here/ })).toBeDefined()
+    expect(await ui.find({ text: /\(this project\)/ })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test("Claude's Bash result does not wait on a slow lagoon CLI", async ($, on) => {
+    machine(on, lagoonCli, { root: '/repo', project: 'acme', hasYml: true, remote: null, isHanging: true })
+    on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false }, text: 'pushed' }) as never)
+    const answer = await $.tool.call({ tool: 'Bash', command: 'git push origin main' })
+    expect(answer.text).toBe('pushed')
+  })
+
+  test('/lagoon opens its pane without waiting on a slow lagoon CLI', async ($, on) => {
+    machine(on, lagoonCli, { root: '/repo', project: 'acme', hasYml: true, remote: null, isHanging: true })
+    expect((await $.command.run({ command: 'lagoon', args: '' } as never)).text).toBe('Lagoon pane opened.')
+  })
+
   test('a missing lagoon binary is said, not read forever', async ($, on) => {
     machine(on, () => 'missing')
-    await $.command.run({ command: 'lagoon', args: '' } as never)
-    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const ui = await openPane($)
     expect(await ui.find({ text: /lagoon CLI unavailable/ })).toBeDefined()
     await ui.unmount()
   })
@@ -314,11 +395,12 @@ describe('pane', () => {
       reads += 1
       return reads === 1 ? run('', 1, 'Error: 504') : run(READ)
     })
-    await $.command.run({ command: 'lagoon', args: '' } as never)
-    await $.command.run({ command: 'lagoon', args: '' } as never)
-    await $.command.run({ command: 'lagoon', args: '' } as never)
-    expect(reads).toBe(3)
+    const ui = await openPane($)
+    await ui.press({ key: 'refresh' })
+    await ui.press({ key: 'refresh' })
+    expect(reads).toBeGreaterThanOrEqual(3)
     expect(seen.toasts).toBe(0)
     expect(seen.status.at(-1)).toMatch(/^Lagoon ● stage applyingDeployments/)
+    await ui.unmount()
   })
 })

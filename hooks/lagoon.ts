@@ -229,7 +229,9 @@ export type LagoonCommand = { environment: string; summary: string }
 // The Lagoon command a shell line runs against an environment of this
 // project, told short: `lagoon ssh: drush cr`, `lagoon deploy latest`,
 // `drush uli` (through an `@lagoon.<project>-<env>` alias).
-export function lagoonCommand(line: string, project: string): LagoonCommand | undefined {
+// With `environments` (the project's, when known), an alias must name one
+// exactly: `@lagoon.acme-intranet-production` is another project's.
+export function lagoonCommand(line: string, project: string, environments?: readonly string[]): LagoonCommand | undefined {
   let found: LagoonCommand | undefined
   for (const command of simpleCommands(line)) {
     const words = unwrapped(command)
@@ -264,7 +266,8 @@ export function lagoonCommand(line: string, project: string): LagoonCommand | un
     if (name === 'drush' && alias !== -1) {
       const environment = words[alias]!.slice(`@lagoon.${project}-`.length)
       const rest = words.filter((_, index) => index !== 0 && index !== alias)
-      if (environment !== '') found = { environment, summary: `drush ${rest.join(' ')}`.trim() }
+      const isKnown = environments === undefined || environments.includes(environment)
+      if (environment !== '' && isKnown) found = { environment, summary: `drush ${rest.join(' ')}`.trim() }
     }
   }
   return found
@@ -309,8 +312,19 @@ export function elapsed(from: number | undefined, to: number): string {
   return `${Math.floor(seconds / 86_400)}d`
 }
 
-// A CLI error that a login fixes: an expired or refused token, an SSH key
-// Lagoon does not know.
+// A CLI error that a login fixes: a token refused or expired, an SSH key
+// Lagoon does not accept. A network failure (even one ssh reports) is not.
 export function isLoginError(error: string): boolean {
-  return /token|unauthori[sz]ed|unauthenticated|\b40[13]\b|permission denied|publickey|ssh|login|expired/i.test(error)
+  return /token (?:is )?(?:expired|invalid)|expired token|invalid token|unauthori[sz]ed|unauthenticated|\b401\b|permission denied \(publickey|unable to authenticate|no supported methods remain|not logged in|please (?:re-?)?log ?in/i.test(error)
+}
+
+// The forms a git remote may be registered under in Lagoon, credentials
+// always stripped: as written, and as the other of its SSH and https forms.
+export function gitUrlCandidates(remote: string): string[] {
+  const clean = remote.trim().replace(/^(https?:\/\/)[^@/]+@/, '$1')
+  if (!/^[\w@:/.+~-]+$/.test(clean)) return []
+  const https = /^https?:\/\/([^/]+)\/(.+?)(?:\.git)?$/.exec(clean)
+  const ssh = /^(?:ssh:\/\/)?git@([^:/]+)[:/](.+?)(?:\.git)?$/.exec(clean)
+  const other = https ? `git@${https[1]}:${https[2]}.git` : ssh ? `https://${ssh[1]}/${ssh[2]}.git` : undefined
+  return [...new Set([clean, other].filter((one): one is string => one !== undefined))]
 }

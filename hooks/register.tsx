@@ -8,6 +8,7 @@ import {
   failedRead,
   firstLine,
   isBaseline,
+  gitUrlCandidates,
   isLoginError,
   isProjectName,
   lagoonCommand,
@@ -38,6 +39,8 @@ const IDLE_MS = 180_000
 const STATUS_MS = 300_000
 // A push reaches Lagoon through a webhook: builds show up a little later.
 const AFTER_PUSH_MS = 15 * 60_000
+// A repo with no Lagoon project is looked up again now and then: one may appear.
+const NONE_MS = 600_000
 
 const LOGIN_HINT = 'Run `lagoon login`; your SSH public key must be added to your Lagoon account (dashboard → Settings → SSH keys).'
 
@@ -46,10 +49,9 @@ const LOGIN_HINT = 'Run `lagoon login`; your SSH public key must be added to you
 let nextAt = 0
 let nextStatusAt = 0
 let fastUntil = 0
-let isFetching = false
+// The read in flight, which a refresh waits for before reading again.
+let reading: Promise<void> | undefined
 let isFetchingStatus = false
-// A refresh asked for while a read runs: it runs once that read ends.
-let isRefreshQueued = false
 // Bumped when the session's root moves: a read started for another root
 // writes nothing.
 let generation = 0
@@ -68,35 +70,38 @@ export const register: Register = (on, options) => {
     timeZone = await localZone($)
     nextAt = 0
     nextStatusAt = 0
-    // Polls when due, and redraws the pane so its "ago" and durations move.
-    $.clock.every(TICK_MS, () => {
-      $.ui.invalidate('ui.render')
-      void tick($)
-    })
-    void tick($)
+    // Polls when due, and redraws an open pane so its "ago" and durations move.
+    $.clock.every(TICK_MS, () => background(heartbeat($)))
+    background(tick($))
     return started
   })
 
+  // The pane opens at once (it says it is reading); the read runs behind it.
   on('command.run', { command: 'lagoon' }, async $ => {
-    await refresh($)
     const opened = await $.ui.open({ id: PANE, title: 'Lagoon' })
+    background(refresh($))
     return { text: opened.isPlaced ? 'Lagoon pane opened.' : 'Lagoon pane waits for a wider terminal.' }
   })
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const ran = await next(e)
-    if (/\bgit\s+push\b|\blagoon\s+deploy\b/.test(e.command)) {
-      fastUntil = (await $.clock.now()) + AFTER_PUSH_MS
-      await refresh($)
-    }
-    if (/\blagoon\s+login\b/.test(e.command)) await refresh($)
     const found = await read($, lookup)
-    const ranOn = found?.status === 'found' ? lagoonCommand(e.command, found.project) : undefined
+    const project = found?.status === 'found' ? found.project : undefined
+    const known = await read($, snapshot)
+    const names = known?.project === project ? known?.environments.map(env => env.name) : undefined
+    const ranOn = project === undefined ? undefined : lagoonCommand(e.command, project, names)
     // A refused command never ran: nothing to tell.
-    if (ranOn !== undefined && ran.deny === undefined) {
+    if (project !== undefined && ranOn !== undefined && ran.deny === undefined) {
       const at = await $.clock.now()
       const command = ranOn.summary.slice(0, 300)
-      await update($, target, () => ({ environment: ranOn.environment, command, at, isFailed: ran.isError === true }))
+      await update($, target, () => ({ project, environment: ranOn.environment, command, at, isFailed: ran.isError === true }))
+    }
+    // Claude gets its result now; the read runs behind it.
+    if (/\bgit\s+push\b|\blagoon\s+deploy\b/.test(e.command)) {
+      fastUntil = (await $.clock.now()) + AFTER_PUSH_MS
+      background(refresh($))
+    } else if (/\blagoon\s+login\b/.test(e.command)) {
+      background(refresh($))
     }
     return ran
   }).catch(($, e, next) => next(e))
@@ -112,6 +117,12 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
 
     const refreshButton = <Button key="refresh" label="Refresh" hotkey="r" onPress={() => refresh($)} />
+    // The cluster line names this project's cluster only: not after a /cd
+    // to a repo with no project, nor before the new project's first read.
+    const ownSnapshot = found?.status === 'found' && stored?.project === found.project ? stored : null
+    const ownCluster = status?.cluster !== undefined && ownSnapshot !== null && status.clusterKey === clusterOf(ownSnapshot)
+      ? status.cluster
+      : undefined
 
     const identityLine = who === null
       ? null
@@ -141,13 +152,13 @@ export const register: Register = (on, options) => {
             {'  '}! {incident.url === undefined ? incident.name : <Link href={incident.url} label={incident.name} />}
           </Text>
         ))}
-        {status.cluster !== undefined && (
+        {ownCluster !== undefined && (
           <Text wrap="truncate-end">
-            {'  '}{status.cluster.name} <Text dimColor>(this project)</Text>:{' '}
-            {status.cluster.status === 'operational' ? '' : <Text color="warning">{componentText(status.cluster.status)} · </Text>}
-            {status.cluster.next === undefined
+            {'  '}{ownCluster.name} <Text dimColor>(this project)</Text>:{' '}
+            {ownCluster.status === 'operational' ? '' : <Text color="warning">{componentText(ownCluster.status)} · </Text>}
+            {ownCluster.next === undefined
               ? <Text dimColor>no maintenance planned</Text>
-              : <Text color={status.cluster.next.isInProgress ? 'warning' : undefined}>maintenance {windowText(status.cluster.next, timeZone)}</Text>}
+              : <Text color={ownCluster.next.isInProgress ? 'warning' : undefined}>maintenance {windowText(ownCluster.next, timeZone)}</Text>}
           </Text>
         )}
         {status.regions.length > 0 && (
@@ -160,7 +171,7 @@ export const register: Register = (on, options) => {
             />
           </Box>
         )}
-        {isExpanded && regionRows(status).map(row => (
+        {isExpanded && regionRows(status, ownCluster?.region).map(row => (
           <Text key={row.name} wrap="truncate-end">
             {'  '}{row.name.padEnd(row.width)}{' '}
             {row.next === undefined
@@ -181,7 +192,12 @@ export const register: Register = (on, options) => {
     )
 
     if (found === null || found.status === 'pending') {
-      return <Box flexDirection="column"><Text dimColor>Reading Lagoon…</Text>{footer}</Box>
+      return (
+        <Box flexDirection="column">
+          <Box gap={1}><Text dimColor>Reading Lagoon…</Text>{refreshButton}</Box>
+          {footer}
+        </Box>
+      )
     }
     if (found.status !== 'found') {
       return (
@@ -246,7 +262,7 @@ export const register: Register = (on, options) => {
             </Text>
           )))}
         </Box>
-        {touched !== null && current !== null && (
+        {touched !== null && current !== null && touched.project === found.project && (
           <Box flexDirection="column" marginTop={1}>
             <Text wrap="truncate-end">
               <Text color={isProduction(current, touched.environment) ? 'error' : 'claude'}>◆ Claude → {touched.environment}</Text>
@@ -272,8 +288,7 @@ function primaryOf(env: LagoonEnvironment) {
 }
 
 // The project's region first, marked; the others by their next window.
-function regionRows(status: LagoonPlatform) {
-  const home = status.cluster?.region
+function regionRows(status: LagoonPlatform, home: string | undefined) {
   const rows = status.regions
     .map(region => ({ name: region.name === home ? `${region.name} ◆` : region.name, next: region.next, isHome: region.name === home }))
     .sort((a, b) => Number(b.isHome) - Number(a.isHome) || (a.next?.from ?? Infinity) - (b.next?.from ?? Infinity))
@@ -281,20 +296,25 @@ function regionRows(status: LagoonPlatform) {
   return rows.map(row => ({ ...row, width }))
 }
 
-// An explicit refresh: reads now, or right after the read in flight; a
-// project that could not be found is looked up again, the status page too.
+// An explicit refresh: reads now, or once the read in flight is done (it
+// may predate what asked); a project that could not be found is looked up
+// again, the status page read again.
 async function refresh($: EngineInterface) {
   const found = await read($, lookup)
   if (found !== null && found.status !== 'found' && found.status !== 'pending') {
     const pending: LagoonLookup = { root: found.root, status: 'pending' }
     await update($, lookup, () => pending)
   }
-  nextAt = 0
   nextStatusAt = 0
-  if (isFetching) {
-    isRefreshQueued = true
-    return
-  }
+  while (reading !== undefined) await reading
+  nextAt = 0
+  await tick($)
+}
+
+// Every TICK_MS: redraw an open pane, and read when due.
+async function heartbeat($: EngineInterface) {
+  const panes = await $.ui.panes().catch(() => [])
+  if (panes.some(pane => pane.id === PANE)) $.ui.invalidate('ui.render')
   await tick($)
 }
 
@@ -310,27 +330,31 @@ async function tick($: EngineInterface) {
     const pending: LagoonLookup = { root, status: 'pending' }
     await update($, lookup, () => pending)
   }
-  void pollPlatform($, now)
-  if (isFetching || now < nextAt) return
+  background(pollPlatform($, now))
+  if (reading !== undefined || now < nextAt) return
 
-  isFetching = true
   const started = generation
+  reading = (async () => {
+    try {
+      nextAt = await poll($, root, started, now)
+    } catch (error) {
+      // Only the unforeseen lands here; the reads record their own failures.
+      if (started === generation) {
+        const failed: LagoonLookup = { root, status: 'error', error: message(error) }
+        await update($, lookup, () => failed)
+      }
+      nextAt = now + IDLE_MS
+    }
+  })()
   try {
-    nextAt = await poll($, root, started, now)
-  } catch (error) {
-    // Only the unforeseen lands here; the reads record their own failures.
-    if (started === generation) {
-      const failed: LagoonLookup = { root, status: 'error', error: message(error) }
-      await update($, lookup, () => failed)
-    }
-    nextAt = now + IDLE_MS
+    await reading
   } finally {
-    isFetching = false
-    if (isRefreshQueued || started !== generation) {
-      isRefreshQueued = false
-      nextAt = 0
-      void tick($)
-    }
+    reading = undefined
+  }
+  // The root moved while it read: read for the new one now.
+  if (started !== generation) {
+    nextAt = 0
+    await tick($)
   }
 }
 
@@ -347,7 +371,7 @@ async function poll($: EngineInterface, root: string, started: number, now: numb
   }
   if (found.status === 'none') {
     $.ui.status(undefined)
-    return Number.POSITIVE_INFINITY
+    return now + NONE_MS
   }
   if (found.status !== 'found') {
     $.ui.status(undefined)
@@ -361,7 +385,7 @@ async function poll($: EngineInterface, root: string, started: number, now: numb
   // The status page was read for another cluster (or none yet): read it again.
   if (clusterOf(fresh) !== statusCluster) {
     nextStatusAt = 0
-    void pollPlatform($, now)
+    background(pollPlatform($, now))
   }
   await noteIdentity($, email, cliError)
   announce($, previous, fresh, now)
@@ -372,7 +396,8 @@ async function poll($: EngineInterface, root: string, started: number, now: numb
 // Who the CLI acts as: the `me` of the last read, or why it could not say.
 async function noteIdentity($: EngineInterface, email: string | undefined, cliError: string | undefined) {
   const known = await read($, identity)
-  const instance = known?.instance ?? await currentInstance($)
+  // Read each time (a local file): the person may switch instances.
+  const instance = await currentInstance($)
   const next: LagoonIdentity = email !== undefined
     ? { instance, email, error: undefined, isLoggedOut: false }
     : cliError !== undefined
@@ -392,7 +417,9 @@ async function pollPlatform($: EngineInterface, now: number) {
   isFetchingStatus = true
   nextStatusAt = now + STATUS_MS
   try {
-    const cluster = clusterOf(await read($, snapshot))
+    const found = await read($, lookup)
+    const stored = await read($, snapshot)
+    const cluster = found?.status === 'found' && stored?.project === found.project ? clusterOf(stored) : undefined
     statusCluster = cluster
     const previous = await read($, platform)
     let next: LagoonPlatform
@@ -412,7 +439,7 @@ async function pollPlatform($: EngineInterface, now: number) {
 
 function failedPlatform(previous: LagoonPlatform | null, error: string, now: number): LagoonPlatform {
   return previous === null
-    ? { name: statusPage, url: statusPage, indicator: 'minor', description: '', incidents: [], cluster: undefined, regions: [], fetchedAt: now, error }
+    ? { name: statusPage, url: statusPage, indicator: 'minor', description: '', incidents: [], cluster: undefined, clusterKey: undefined, regions: [], fetchedAt: now, error }
     : { ...previous, error }
 }
 
@@ -443,22 +470,26 @@ async function projectFor($: EngineInterface, root: string, lagoonYml: string | 
   if (named !== undefined) return { root, status: 'found', project: named }
 
   const repo = await $.session.repo()
-  if (repo?.remote == null || !/^[\w@:/.+-]+$/.test(repo.remote)) return { root, status: 'none' }
-  const ran = await lagoon($, ['raw', '--raw', `{ projectByGitUrl(gitUrl: "${repo.remote}") { name } }`])
-  if ('error' in ran) {
-    await noteIdentity($, undefined, ran.error)
-    return { root, status: 'error', error: ran.error }
+  // Never the remote as written: it may carry credentials (https://user:token@…).
+  const candidates = repo?.remote == null ? [] : gitUrlCandidates(repo.remote)
+  for (const gitUrl of candidates) {
+    const ran = await lagoon($, ['raw', '--raw', `{ projectByGitUrl(gitUrl: "${gitUrl}") { name } }`])
+    if ('error' in ran) {
+      await noteIdentity($, undefined, ran.error)
+      return { root, status: 'error', error: ran.error }
+    }
+    try {
+      const answer = parseRaw(ran.stdout).projectByGitUrl as { name?: unknown } | null | undefined
+      if (answer === null) continue
+      const name = answer?.name
+      return typeof name === 'string' && isProjectName(name)
+        ? { root, status: 'found', project: name }
+        : { root, status: 'error', error: 'unexpected answer to projectByGitUrl' }
+    } catch (error) {
+      return { root, status: 'error', error: message(error) }
+    }
   }
-  try {
-    const answer = parseRaw(ran.stdout).projectByGitUrl as { name?: unknown } | null | undefined
-    if (answer === null) return { root, status: 'none' }
-    const name = answer?.name
-    return typeof name === 'string' && isProjectName(name)
-      ? { root, status: 'found', project: name }
-      : { root, status: 'error', error: 'unexpected answer to projectByGitUrl' }
-  } catch (error) {
-    return { root, status: 'error', error: message(error) }
-  }
+  return { root, status: 'none' }
 }
 
 type ProjectRead = { fresh: LagoonSnapshot; email: string | undefined; cliError: string | undefined }
@@ -567,6 +598,12 @@ function dashboardOf(current: LagoonSnapshot): string | undefined {
 
 function isProduction(current: LagoonSnapshot, name: string): boolean {
   return current.environments.some(env => env.name === name && env.isProduction)
+}
+
+// Work nobody awaits: it records its own failures; what is left (the module
+// unloading under it) is dropped, never left unhandled.
+function background(work: Promise<unknown>) {
+  work.catch(() => undefined)
 }
 
 function message(error: unknown): string {

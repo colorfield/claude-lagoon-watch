@@ -57,6 +57,7 @@ export function platform(json: string, cluster: string | undefined, now: number)
         status: component.status,
         next: nextFor(new Set([component.id])),
       },
+    clusterKey: cluster,
     regions,
     fetchedAt: now,
     error: undefined,

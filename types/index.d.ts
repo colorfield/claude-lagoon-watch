@@ -65,13 +65,15 @@ export type LagoonPlatform = {
   description: string
   incidents: { name: string; url: string | undefined; impact: string }[]
   cluster: { name: string; region: string | undefined; status: string; next: LagoonWindow | undefined } | undefined
+  // The Lagoon cluster the page was read for (`ch4.amazee.io`).
+  clusterKey: string | undefined
   regions: { name: string; next: LagoonWindow | undefined }[]
   fetchedAt: number
   error: string | undefined
 }
 
 // The last command Claude ran against an environment, and whether it failed.
-export type LagoonTarget = { environment: string; command: string; at: number; isFailed: boolean }
+export type LagoonTarget = { project: string; environment: string; command: string; at: number; isFailed: boolean }
 
 declare module 'claude-code' {
   interface PluginState {
