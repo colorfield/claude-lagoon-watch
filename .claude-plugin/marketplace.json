@@ -1,0 +1,16 @@
+{
+  "name": "claude-lagoon-watch",
+  "owner": {
+    "name": "Christophe Jossart"
+  },
+  "metadata": {
+    "description": "Pane with the Lagoon project's environments: build status, build log links, last build, and links to each service"
+  },
+  "plugins": [
+    {
+      "name": "lagoon-watch",
+      "source": "./",
+      "description": "Pane with the Lagoon project's environments: build status, build log links, last build, and links to each service"
+    }
+  ]
+}

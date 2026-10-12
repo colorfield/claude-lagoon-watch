@@ -1,0 +1,11 @@
+{
+  "name": "lagoon-watch",
+  "version": "0.1.0",
+  "description": "Pane with the Lagoon project's environments: build status, build log links, last build, and links to each service",
+  "author": {
+    "name": "Christophe Jossart"
+  },
+  "repository": "https://github.com/colorfield/claude-lagoon-watch",
+  "types": "./types/index.d.ts",
+  "license": "MIT"
+}
