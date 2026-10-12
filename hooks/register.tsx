@@ -176,7 +176,7 @@ export const register: Register = (on, options) => {
     const footer = (
       <Box flexDirection="column" marginTop={1}>
         {platformBlock}
-        {identityLine}
+        {identityLine !== null && <Box marginTop={platformBlock === null ? 0 : 1}>{identityLine}</Box>}
       </Box>
     )
 
