@@ -167,22 +167,107 @@ function byInterest(a: LagoonEnvironment, b: LagoonEnvironment): number {
     || (b.build?.createdAt ?? 0) - (a.build?.createdAt ?? 0)
 }
 
-// `lagoon ssh -e stage`, `--environment=pr-12`, `drush @lagoon.acme-production`;
-// only a lagoon command (not a file named *.lagoon.yml), and only one that
-// names this project or none.
-export function targetOf(command: string, project: string): string | undefined {
-  for (const segment of command.split(/;|&&|\|\||\|/)) {
-    const words = segment.trim().replace(/^(?:[A-Z_][A-Z0-9_]*=\S*\s+)*/, '')
-    if (/^lagoon\s/.test(words)) {
-      const named = /\s(?:-p|--project)(?:=|\s+)['"]?([\w-]+)/.exec(words)?.[1]
-      if (named !== undefined && named !== project) continue
-      const flag = /\s(?:-e|--environment)(?:=|\s+)['"]?([\w.-]+)/.exec(words)
-      if (flag) return flag[1]
-    }
-    const alias = new RegExp(`@lagoon\\.${project}-([\\w-]+)`).exec(words)
-    if (alias) return alias[1]
+// The simple commands of a shell line, each as its words: quotes kept
+// together, heredoc bodies dropped (they are data, not commands).
+export function simpleCommands(line: string): string[][] {
+  const text = line.replace(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n[\s\S]*?\n[ \t]*\2[ \t]*(?=\n|$)/g, '')
+  const commands: string[][] = []
+  let words: string[] = []
+  let word: string | undefined
+  let quote: string | undefined
+  const endWord = () => {
+    if (word !== undefined) words.push(word)
+    word = undefined
   }
-  return undefined
+  const endCommand = () => {
+    endWord()
+    if (words.length > 0) commands.push(words)
+    words = []
+  }
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]!
+    if (quote !== undefined) {
+      if (char === quote) quote = undefined
+      else word = (word ?? '') + char
+    } else if (char === "'" || char === '"') {
+      quote = char
+      word = word ?? ''
+    } else if (char === '\\' && index + 1 < text.length) {
+      index += 1
+      if (text[index] !== '\n') word = (word ?? '') + text[index]
+    } else if (/[;&|()\n]/.test(char)) {
+      endCommand()
+    } else if (/\s/.test(char)) {
+      endWord()
+    } else {
+      word = (word ?? '') + char
+    }
+  }
+  endCommand()
+  return commands
+}
+
+// The command a wrapper runs: env assignments and `timeout 60`, `direnv exec .`,
+// `devbox run --`, `nohup`, `sudo` and the like dropped.
+function unwrapped(command: readonly string[]): string[] {
+  let words = [...command]
+  for (;;) {
+    const [first = '', second = ''] = words
+    if (/^[A-Z_][A-Z0-9_]*=/.test(first) || ['exec', 'time', 'command', 'env', 'nohup', 'sudo'].includes(first)) words = words.slice(1)
+    else if (first === 'timeout') words = words.slice(words.findIndex((one, index) => index > 0 && /^\d/.test(one)) + 1 || 1)
+    else if (first === 'direnv' && second === 'exec') words = words.slice(3)
+    else if (first === 'devbox' && second === 'run') words = words.slice(words[2] === '--' ? 3 : 2)
+    else return words
+  }
+}
+
+// lagoon flags that take a value (the rest are switches).
+const VALUED = new Set(['-p', '--project', '-e', '--environment', '-l', '--lagoon', '-C', '--command', '-i', '--ssh-key', '--config-file'])
+
+export type LagoonCommand = { environment: string; summary: string }
+
+// The Lagoon command a shell line runs against an environment of this
+// project, told short: `lagoon ssh: drush cr`, `lagoon deploy latest`,
+// `drush uli` (through an `@lagoon.<project>-<env>` alias).
+export function lagoonCommand(line: string, project: string): LagoonCommand | undefined {
+  let found: LagoonCommand | undefined
+  for (const command of simpleCommands(line)) {
+    const words = unwrapped(command)
+    const name = words[0]?.split('/').at(-1)
+
+    if (name === 'lagoon') {
+      const values = new Map<string, string>()
+      const subcommands: string[] = []
+      let remote: string[] = []
+      for (let index = 1; index < words.length; index += 1) {
+        const one = words[index]!
+        if (one === '--') {
+          remote = words.slice(index + 1)
+          break
+        }
+        const [flag, inline] = one.split(/=(.*)/s)
+        if (VALUED.has(flag!)) {
+          values.set(flag!.replace(/^--?/, ''), inline ?? words[index + 1] ?? '')
+          if (inline === undefined) index += 1
+        } else if (!one.startsWith('-')) {
+          subcommands.push(one)
+        }
+      }
+      const named = values.get('p') ?? values.get('project')
+      const environment = values.get('e') ?? values.get('environment')
+      if (environment === undefined || (named !== undefined && named !== project)) continue
+      const run = remote.length > 0 ? remote.join(' ') : values.get('C') ?? values.get('command')
+      found = { environment, summary: `lagoon ${subcommands.join(' ')}${run ? `: ${run}` : ''}`.trim() }
+    }
+
+    const alias = words.findIndex(one => one.startsWith(`@lagoon.${project}-`))
+    if (name === 'drush' && alias !== -1) {
+      const environment = words[alias]!.slice(`@lagoon.${project}-`.length)
+      const rest = words.filter((_, index) => index !== 0 && index !== alias)
+      if (environment !== '') found = { environment, summary: `drush ${rest.join(' ')}`.trim() }
+    }
+  }
+  return found
 }
 
 // `lagoon raw` prints the answer's JSON; anything around it (a notice, an

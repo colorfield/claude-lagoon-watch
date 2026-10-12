@@ -1,6 +1,6 @@
 {
   "name": "lagoon-watch",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Pane with the Lagoon project's environments: build status, build log links, last build, and links to each service",
   "author": {
     "name": "Christophe Jossart"

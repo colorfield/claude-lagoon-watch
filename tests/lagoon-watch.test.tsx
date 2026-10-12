@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { buildState, environments, failedRead, generatedSuffix, isBaseline, isLoginError, lagoonTime, parseRaw, projectOf, services, targetOf } from '../hooks/lagoon'
+import { buildState, environments, failedRead, generatedSuffix, isBaseline, isLoginError, lagoonCommand, lagoonTime, parseRaw, projectOf, services, simpleCommands } from '../hooks/lagoon'
 import { clusterComponent, platform, windowText, zoneOf } from '../hooks/status'
 import type { LagoonSnapshot } from '../types'
 
@@ -107,15 +107,34 @@ describe('lagoon', () => {
     expect(lagoonTime('2026-10-12 11:35:43')).toBe(Date.parse('2026-10-12T11:35:43Z'))
   })
 
-  test('finds the environment a command targets', () => {
-    expect(targetOf('lagoon ssh -p acme -e production -- drush cr', 'acme')).toBe('production')
-    expect(targetOf('lagoon list deployments --environment=stage', 'acme')).toBe('stage')
-    expect(targetOf('drush @lagoon.acme-stage uli', 'acme')).toBe('stage')
-    expect(targetOf('ls -e foo', 'acme')).toBeUndefined()
-    // A compose file named after Lagoon, or another project's environment, is no target.
-    expect(targetOf('docker compose -f docker-compose.lagoon.yml exec -e VAR=1 cli bash', 'acme')).toBeUndefined()
-    expect(targetOf('lagoon ssh -p globex -e production', 'acme')).toBeUndefined()
-    expect(targetOf('lagoon ssh -p acme -e production', 'acme')).toBe('production')
+  test('tells the Lagoon command a shell line runs, short', () => {
+    const on = (line: string) => lagoonCommand(line, 'acme')
+    expect(on('lagoon ssh -p acme -e production -- drush cr')).toEqual({ environment: 'production', summary: 'lagoon ssh: drush cr' })
+    expect(on("cd web && lagoon ssh -e stage -C 'drush uli --name=admin'")).toEqual({ environment: 'stage', summary: 'lagoon ssh: drush uli --name=admin' })
+    expect(on('lagoon deploy latest --environment=pr-12 --force')).toEqual({ environment: 'pr-12', summary: 'lagoon deploy latest' })
+    expect(on('timeout 60 drush @lagoon.acme-stage uli')).toEqual({ environment: 'stage', summary: 'drush uli' })
+    expect(on('direnv exec . devbox run -- lagoon ssh -e dev -- drush status')).toEqual({ environment: 'dev', summary: 'lagoon ssh: drush status' })
+    expect(on('drush @lagoon.acme-stage uli')).toEqual({ environment: 'stage', summary: 'drush uli' })
+    expect(on('/opt/homebrew/bin/lagoon list deployments -p acme -e dev')).toEqual({ environment: 'dev', summary: 'lagoon list deployments' })
+  })
+
+  test('ignores what only looks like one', () => {
+    const on = (line: string) => lagoonCommand(line, 'acme')
+    // Another project, no environment, a compose file, a commit message, a script's data.
+    expect(on('lagoon ssh -p globex -e production')).toBeUndefined()
+    expect(on('lagoon list projects')).toBeUndefined()
+    expect(on('docker compose -f docker-compose.lagoon.yml exec -e VAR=1 cli bash')).toBeUndefined()
+    expect(on('git commit -m "lagoon ssh -e production -- drush cr"')).toBeUndefined()
+    expect(on("R=~/x; python3 - <<'EOF'\nimport os\ns = 'x'; lagoon ssh -p acme -e production -- drush cr\nEOF\necho done")).toBeUndefined()
+    expect(on('ls -e foo')).toBeUndefined()
+  })
+
+  test('splits a shell line into its simple commands', () => {
+    expect(simpleCommands(`A=1 lagoon ssh -e 'my env' && echo "a;b" | wc -l`)).toEqual([
+      ['A=1', 'lagoon', 'ssh', '-e', 'my env'],
+      ['echo', 'a;b'],
+      ['wc', '-l'],
+    ])
   })
 
   test('reads the JSON out of noisy CLI output', () => {
@@ -271,12 +290,12 @@ describe('pane', () => {
     await $.tool.call({ tool: 'Bash', command: 'lagoon ssh -p acme -e production -- drush cr' })
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
     expect(await ui.find({ text: /◆ Claude → production · 0s ago · ✗ failed/ })).toBeDefined()
-    expect(await ui.find({ text: 'lagoon ssh -p acme -e production -- drush cr' })).toBeDefined()
+    expect(await ui.find({ text: 'lagoon ssh: drush cr' })).toBeDefined()
 
     isFailing = false
     await $.tool.call({ tool: 'Bash', command: 'lagoon ssh -p acme -e stage -- drush uli' })
     expect(await ui.find({ text: /◆ Claude → stage · 0s ago · ✓/ })).toBeDefined()
-    expect(await ui.find({ text: /drush uli/ })).toBeDefined()
+    expect(await ui.find({ text: 'lagoon ssh: drush uli' })).toBeDefined()
     await ui.unmount()
   })
 

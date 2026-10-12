@@ -10,10 +10,10 @@ import {
   isBaseline,
   isLoginError,
   isProjectName,
+  lagoonCommand,
   parseRaw,
   projectOf,
   QUERY,
-  targetOf,
 } from './lagoon'
 import { componentText, INDICATOR, platform as readPlatform, windowText, zoneOf } from './status'
 
@@ -27,7 +27,7 @@ const PANE = 'lagoon-watch'
 // Everything the pane draws from is state, so every change redraws it.
 const lookup = atom({ plugin: 'lagoon-watch', key: 'lookup' } as const, null)
 const snapshot = atom({ plugin: 'lagoon-watch', key: 'snapshot' } as const, null)
-const target = atom({ plugin: 'lagoon-watch', key: 'target' } as const, null)
+const target = atom({ plugin: 'lagoon-watch', key: 'lastCommand' } as const, null)
 const identity = atom({ plugin: 'lagoon-watch', key: 'identity' } as const, null)
 const platform = atom({ plugin: 'lagoon-watch', key: 'platform' } as const, null)
 const isShowingRegions = atom({ plugin: 'lagoon-watch', key: 'isShowingRegions' } as const, false)
@@ -91,12 +91,12 @@ export const register: Register = (on, options) => {
     }
     if (/\blagoon\s+login\b/.test(e.command)) await refresh($)
     const found = await read($, lookup)
-    const environment = found?.status === 'found' ? targetOf(e.command, found.project) : undefined
+    const ranOn = found?.status === 'found' ? lagoonCommand(e.command, found.project) : undefined
     // A refused command never ran: nothing to tell.
-    if (environment !== undefined && ran.deny === undefined) {
+    if (ranOn !== undefined && ran.deny === undefined) {
       const at = await $.clock.now()
-      const command = e.command.replace(/\s+/g, ' ').trim().slice(0, 500)
-      await update($, target, () => ({ environment, command, at, isFailed: ran.isError === true }))
+      const command = ranOn.summary.slice(0, 300)
+      await update($, target, () => ({ environment: ranOn.environment, command, at, isFailed: ran.isError === true }))
     }
     return ran
   }).catch(($, e, next) => next(e))

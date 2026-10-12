@@ -78,7 +78,7 @@ declare module 'claude-code' {
     'lagoon-watch': {
       lookup: LagoonLookup | null
       snapshot: LagoonSnapshot | null
-      target: LagoonTarget | null
+      lastCommand: LagoonTarget | null
       identity: LagoonIdentity | null
       platform: LagoonPlatform | null
       isShowingRegions: boolean
