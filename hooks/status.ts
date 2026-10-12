@@ -1,4 +1,5 @@
 import type { LagoonPlatform, LagoonWindow } from '../types'
+import { webUrl } from './lagoon'
 
 // Reads a Statuspage summary (/api/v2/summary.json) into what the pane
 // shows. Pure, so the tests read it.
@@ -43,12 +44,13 @@ export function platform(json: string, cluster: string | undefined, now: number)
 
   return {
     name: summary.page.name,
-    url: summary.page.url,
+    // Not a web address: the name is drawn as plain text (a blank href).
+    url: webUrl(summary.page.url) ?? '',
     indicator: summary.status.indicator,
     description: summary.status.description,
     incidents: summary.incidents
       .filter(one => one.status !== 'resolved' && one.status !== 'postmortem')
-      .map(one => ({ name: one.name, url: one.shortlink, impact: one.impact })),
+      .map(one => ({ name: one.name, url: webUrl(one.shortlink), impact: one.impact })),
     cluster: component === undefined
       ? undefined
       : {
@@ -69,7 +71,7 @@ function toWindow(maintenance: Maintenance, now: number): LagoonWindow {
   const until = maintenance.scheduled_until ? Date.parse(maintenance.scheduled_until) : undefined
   return {
     name: maintenance.name,
-    url: maintenance.shortlink,
+    url: webUrl(maintenance.shortlink),
     from,
     until,
     isInProgress: maintenance.status !== 'scheduled' || (from <= now && (until === undefined || now < until)),

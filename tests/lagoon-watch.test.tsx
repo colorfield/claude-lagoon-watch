@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { buildState, environments, failedRead, generatedSuffix, isBaseline, gitUrlCandidates, isLoginError, lagoonCommand, lagoonTime, parseRaw, projectOf, services, simpleCommands } from '../hooks/lagoon'
+import { buildState, environments, failedRead, generatedSuffix, isBaseline, gitUrlCandidates, isLoginError, lagoonCommand, lagoonTime, parseRaw, projectOf, services, simpleCommands, webUrl } from '../hooks/lagoon'
 import { clusterComponent, platform, windowText, zoneOf } from '../hooks/status'
 import type { LagoonSnapshot } from '../types'
 
@@ -218,6 +218,25 @@ describe('status page', () => {
       .toEqual(['https://github.com/o/acme.git', 'git@github.com:o/acme.git'])
     expect(gitUrlCandidates('git@github.com:o/acme.git')).toEqual(['git@github.com:o/acme.git', 'https://github.com/o/acme.git'])
     expect(gitUrlCandidates('git@github.com:o/acme.git" } evil { "')).toEqual([])
+    // Any spelling of the scheme, and an ssh:// password, are stripped too.
+    expect(gitUrlCandidates('HTTPS://bot:ghp_secret@github.com/o/acme.git')[0]).toBe('https://github.com/o/acme.git')
+    expect(gitUrlCandidates('ssh://git:hunter2@github.com/o/acme.git')).toEqual(['ssh://git@github.com/o/acme.git', 'https://github.com/o/acme.git'])
+  })
+
+  test('links only web addresses from answers it does not control', () => {
+    expect(webUrl('https://dashboard.example/x')).toBe('https://dashboard.example/x')
+    expect(webUrl('javascript:alert(1)')).toBeUndefined()
+    expect(webUrl('file:///etc/passwd')).toBeUndefined()
+    expect(webUrl('vscode://open?x')).toBeUndefined()
+    expect(webUrl(null)).toBeUndefined()
+    const env = { route: 'file:///etc/passwd', routes: 'https://cms.acme.com,javascript:alert(1)' }
+    expect(services(env, undefined).map(one => one.url)).toEqual(['https://cms.acme.com'])
+    const hostile = JSON.parse(SUMMARY) as { page: { url: string }; incidents: { shortlink?: string }[] }
+    hostile.page.url = 'javascript:alert(1)'
+    hostile.incidents[0]!.shortlink = 'file:///etc/passwd'
+    const read = platform(JSON.stringify(hostile), undefined, 0)
+    expect(read.url).toBe('')
+    expect(read.incidents[0]?.url).toBeUndefined()
   })
 })
 

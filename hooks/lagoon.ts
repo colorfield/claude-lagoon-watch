@@ -103,7 +103,7 @@ function build(deployment: ApiDeployment | undefined): LagoonBuild | undefined {
     createdAt: lagoonTime(deployment.created),
     startedAt: lagoonTime(deployment.started),
     completedAt: lagoonTime(deployment.completed),
-    url: deployment.uiLink ?? undefined,
+    url: webUrl(deployment.uiLink),
   }
 }
 
@@ -124,11 +124,11 @@ export function generatedSuffix(project: Pick<ApiProject, 'name' | 'routerPatter
 // every route when it names none; a generated route only where no canonical
 // one carries its name (auth.example.com over auth.<env>.<project>.<cluster>).
 export function services(env: Pick<ApiEnvironment, 'route' | 'routes'>, lagoonYml: string | undefined, suffix?: string): LagoonService[] {
-  const urls = [...new Set([env.route, ...(env.routes ?? '').split(',')].map(url => url?.trim()).filter((url): url is string => !!url))]
+  const urls = [...new Set([env.route, ...(env.routes ?? '').split(',')].map(webUrl).filter((url): url is string => url !== undefined))]
   const own = lagoonYml === undefined ? [] : urls.filter(url => names(lagoonYml, host(url)))
   const chosen = (own.length > 0 ? own : urls).map(url => ({ label: label(host(url)), url, isGenerated: isGenerated(host(url), suffix) }))
   const canonical = new Set(chosen.filter(one => !one.isGenerated).map(one => one.label))
-  const primary = env.route?.trim()
+  const primary = webUrl(env.route)
   return chosen
     .filter(one => !one.isGenerated || !canonical.has(one.label))
     .map(({ label, url }) => ({ label, url, isPrimary: url === primary }))
@@ -319,12 +319,25 @@ export function isLoginError(error: string): boolean {
 }
 
 // The forms a git remote may be registered under in Lagoon, credentials
-// always stripped: as written, and as the other of its SSH and https forms.
+// always stripped (an https remote's user and token, an ssh:// remote's
+// password; any spelling of the scheme): as written, and as the other of its
+// SSH and https forms.
 export function gitUrlCandidates(remote: string): string[] {
-  const clean = remote.trim().replace(/^(https?:\/\/)[^@/]+@/, '$1')
+  const clean = remote.trim()
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//i, scheme => scheme.toLowerCase())
+    .replace(/^(https?:\/\/)[^@/]+@/, '$1')
+    .replace(/^(ssh:\/\/[^:@/]+):[^@/]*@/, '$1@')
   if (!/^[\w@:/.+~-]+$/.test(clean)) return []
   const https = /^https?:\/\/([^/]+)\/(.+?)(?:\.git)?$/.exec(clean)
   const ssh = /^(?:ssh:\/\/)?git@([^:/]+)[:/](.+?)(?:\.git)?$/.exec(clean)
   const other = https ? `git@${https[1]}:${https[2]}.git` : ssh ? `https://${ssh[1]}/${ssh[2]}.git` : undefined
   return [...new Set([clean, other].filter((one): one is string => one !== undefined))]
+}
+
+// A link from an answer we do not control (the Lagoon API, a status page) is
+// drawn clickable only when it is a web address: never file:, javascript: or
+// an app's own scheme.
+export function webUrl(url: string | null | undefined): string | undefined {
+  const trimmed = url?.trim()
+  return trimmed && /^https?:\/\/[^\s/]/i.test(trimmed) ? trimmed : undefined
 }
