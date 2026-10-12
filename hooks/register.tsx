@@ -92,9 +92,11 @@ export const register: Register = (on, options) => {
     if (/\blagoon\s+login\b/.test(e.command)) await refresh($)
     const found = await read($, lookup)
     const environment = found?.status === 'found' ? targetOf(e.command, found.project) : undefined
-    if (environment !== undefined) {
+    // A refused command never ran: nothing to tell.
+    if (environment !== undefined && ran.deny === undefined) {
       const at = await $.clock.now()
-      await update($, target, () => ({ environment, command: e.command.slice(0, 200), at }))
+      const command = e.command.replace(/\s+/g, ' ').trim().slice(0, 500)
+      await update($, target, () => ({ environment, command, at, isFailed: ran.isError === true }))
     }
     return ran
   }).catch(($, e, next) => next(e))
@@ -245,9 +247,14 @@ export const register: Register = (on, options) => {
           )))}
         </Box>
         {touched !== null && current !== null && (
-          <Text wrap="truncate-end" color={isProduction(current, touched.environment) ? 'error' : 'subtle'}>
-            ◆ Claude's last Lagoon command: {touched.environment} ({elapsed(touched.at, now)} ago)
-          </Text>
+          <Box flexDirection="column" marginTop={1}>
+            <Text wrap="truncate-end">
+              <Text color={isProduction(current, touched.environment) ? 'error' : 'claude'}>◆ Claude → {touched.environment}</Text>
+              <Text dimColor> · {elapsed(touched.at, now)} ago · </Text>
+              <Text color={touched.isFailed ? 'error' : 'success'}>{touched.isFailed ? '✗ failed' : '✓'}</Text>
+            </Text>
+            <Text dimColor wrap="truncate-end">  {touched.command}</Text>
+          </Box>
         )}
         {footer}
       </Box>

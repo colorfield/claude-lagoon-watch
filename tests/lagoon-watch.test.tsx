@@ -263,6 +263,23 @@ describe('pane', () => {
     await ui.unmount()
   })
 
+  test("shows the command Claude last ran on an environment, and how it went", async ($, on) => {
+    machine(on, query => run(query.includes('projectByGitUrl') ? FOUND : READ))
+    let isFailing = true
+    on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false }, text: 'ok', isError: isFailing }) as never)
+    await $.command.run({ command: 'lagoon', args: '' } as never)
+    await $.tool.call({ tool: 'Bash', command: 'lagoon ssh -p acme -e production -- drush cr' })
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ text: /◆ Claude → production · 0s ago · ✗ failed/ })).toBeDefined()
+    expect(await ui.find({ text: 'lagoon ssh -p acme -e production -- drush cr' })).toBeDefined()
+
+    isFailing = false
+    await $.tool.call({ tool: 'Bash', command: 'lagoon ssh -p acme -e stage -- drush uli' })
+    expect(await ui.find({ text: /◆ Claude → stage · 0s ago · ✓/ })).toBeDefined()
+    expect(await ui.find({ text: /drush uli/ })).toBeDefined()
+    await ui.unmount()
+  })
+
   test('a missing lagoon binary is said, not read forever', async ($, on) => {
     machine(on, () => 'missing')
     await $.command.run({ command: 'lagoon', args: '' } as never)

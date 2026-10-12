@@ -70,7 +70,8 @@ export type LagoonPlatform = {
   error: string | undefined
 }
 
-export type LagoonTarget = { environment: string; command: string; at: number }
+// The last command Claude ran against an environment, and whether it failed.
+export type LagoonTarget = { environment: string; command: string; at: number; isFailed: boolean }
 
 declare module 'claude-code' {
   interface PluginState {
