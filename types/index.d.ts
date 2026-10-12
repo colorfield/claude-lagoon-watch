@@ -29,14 +29,23 @@ export type LagoonEnvironment = {
 export type LagoonSnapshot = {
   project: string
   environments: LagoonEnvironment[]
-  fetchedAt: number
+  // When the environments were last read; undefined before the first good read.
+  fetchedAt: number | undefined
+  // Why the last read failed; the environments are then the last good ones.
   error: string | undefined
 }
+
+// Which Lagoon project the session's root deploys to.
+export type LagoonLookup =
+  | { root: string; status: 'pending' }
+  | { root: string; status: 'found'; project: string }
+  | { root: string; status: 'none' }
+  | { root: string; status: 'error'; error: string }
 
 export type LagoonTarget = { environment: string; command: string; at: number }
 
 declare module 'claude-code' {
   interface PluginState {
-    'lagoon-watch': { snapshot: LagoonSnapshot | null; target: LagoonTarget | null }
+    'lagoon-watch': { lookup: LagoonLookup | null; snapshot: LagoonSnapshot | null; target: LagoonTarget | null }
   }
 }

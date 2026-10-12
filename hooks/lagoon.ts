@@ -1,4 +1,4 @@
-import type { LagoonBuild, LagoonBuildState, LagoonEnvironment, LagoonService } from '../types'
+import type { LagoonBuild, LagoonBuildState, LagoonEnvironment, LagoonService, LagoonSnapshot } from '../types'
 
 // Reads Lagoon's GraphQL answer and the repo's .lagoon.yml into what the pane
 // shows. Pure, so the tests read it.
@@ -164,13 +164,52 @@ function byInterest(a: LagoonEnvironment, b: LagoonEnvironment): number {
     || (b.build?.createdAt ?? 0) - (a.build?.createdAt ?? 0)
 }
 
-// `lagoon ssh -e stage`, `--environment=pr-12`, `drush @lagoon.acme-production`.
+// `lagoon ssh -e stage`, `--environment=pr-12`, `drush @lagoon.acme-production`;
+// only a lagoon command (not a file named *.lagoon.yml), and only one that
+// names this project or none.
 export function targetOf(command: string, project: string): string | undefined {
-  if (!/\blagoon\b|@lagoon\./.test(command)) return undefined
-  const flag = /\blagoon\b[^;&|]*?(?:\s-e|\s--environment)(?:=|\s+)['"]?([\w.-]+)/.exec(command)
-  if (flag) return flag[1]
-  const alias = new RegExp(`@lagoon\\.${project}-([\\w-]+)`).exec(command)
-  return alias?.[1]
+  for (const segment of command.split(/;|&&|\|\||\|/)) {
+    const words = segment.trim().replace(/^(?:[A-Z_][A-Z0-9_]*=\S*\s+)*/, '')
+    if (/^lagoon\s/.test(words)) {
+      const named = /\s(?:-p|--project)(?:=|\s+)['"]?([\w-]+)/.exec(words)?.[1]
+      if (named !== undefined && named !== project) continue
+      const flag = /\s(?:-e|--environment)(?:=|\s+)['"]?([\w.-]+)/.exec(words)
+      if (flag) return flag[1]
+    }
+    const alias = new RegExp(`@lagoon\\.${project}-([\\w-]+)`).exec(words)
+    if (alias) return alias[1]
+  }
+  return undefined
+}
+
+// `lagoon raw` prints the answer's JSON; anything around it (a notice, an
+// update hint) is dropped. Throws when there is no JSON object.
+export function parseRaw(stdout: string): Record<string, unknown> {
+  const start = stdout.indexOf('{')
+  const end = stdout.lastIndexOf('}')
+  if (start === -1 || end < start) throw new Error(`unexpected lagoon output: ${firstLine(stdout) || '(empty)'}`)
+  return JSON.parse(stdout.slice(start, end + 1)) as Record<string, unknown>
+}
+
+export function firstLine(text: string): string {
+  return text.trim().split('\n')[0]?.slice(0, 200) ?? ''
+}
+
+// A failed read keeps the last good environments of the same project, never
+// another project's.
+export function failedRead(previous: LagoonSnapshot | null, project: string, error: string): LagoonSnapshot {
+  return previous !== null && previous.project === project
+    ? { ...previous, error }
+    : { project, environments: [], fetchedAt: undefined, error }
+}
+
+// Builds are news only against a good read of the same project: the first
+// read, or the first after failures, only sets the baseline.
+export function isBaseline(previous: LagoonSnapshot | null, fresh: LagoonSnapshot): previous is LagoonSnapshot {
+  return previous !== null
+    && previous.project === fresh.project
+    && previous.fetchedAt !== undefined
+    && fresh.error === undefined
 }
 
 export function elapsed(from: number | undefined, to: number): string {

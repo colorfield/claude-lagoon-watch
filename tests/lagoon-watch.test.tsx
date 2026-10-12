@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
+import type { On } from 'claude-code'
 
-import { buildState, environments, generatedSuffix, lagoonTime, projectOf, services, targetOf } from '../hooks/lagoon'
+import { buildState, environments, failedRead, generatedSuffix, isBaseline, lagoonTime, parseRaw, projectOf, services, targetOf } from '../hooks/lagoon'
 import type { LagoonSnapshot } from '../types'
 
 const YML = `docker-compose-yaml: docker-compose.yml
@@ -109,6 +110,29 @@ describe('lagoon', () => {
     expect(targetOf('lagoon list deployments --environment=stage', 'acme')).toBe('stage')
     expect(targetOf('drush @lagoon.acme-stage uli', 'acme')).toBe('stage')
     expect(targetOf('ls -e foo', 'acme')).toBeUndefined()
+    // A compose file named after Lagoon, or another project's environment, is no target.
+    expect(targetOf('docker compose -f docker-compose.lagoon.yml exec -e VAR=1 cli bash', 'acme')).toBeUndefined()
+    expect(targetOf('lagoon ssh -p globex -e production', 'acme')).toBeUndefined()
+    expect(targetOf('lagoon ssh -p acme -e production', 'acme')).toBe('production')
+  })
+
+  test('reads the JSON out of noisy CLI output', () => {
+    expect(parseRaw('A new version is available\n{"a":1}\n')).toEqual({ a: 1 })
+    expect(() => parseRaw('Error: token expired')).toThrow(/unexpected lagoon output/)
+  })
+
+  test("never keeps another project's environments after a failed read", () => {
+    const acme = { project: 'acme', environments: environments(PROJECT, 'stage', YML), fetchedAt: 1, error: undefined }
+    expect(failedRead(acme, 'acme', 'boom').environments.length).toBe(4)
+    expect(failedRead(acme, 'globex', 'boom')).toEqual({ project: 'globex', environments: [], fetchedAt: undefined, error: 'boom' })
+  })
+
+  test('only a good read of the same project is a baseline', () => {
+    const good = { project: 'acme', environments: [], fetchedAt: 1, error: undefined }
+    expect(isBaseline(null, good)).toBe(false)
+    expect(isBaseline({ ...good, fetchedAt: undefined, error: 'boom' }, good)).toBe(false)
+    expect(isBaseline({ ...good, project: 'globex' }, good)).toBe(false)
+    expect(isBaseline(good, good)).toBe(true)
   })
 })
 
@@ -119,17 +143,81 @@ const SNAPSHOT: LagoonSnapshot = {
   error: undefined,
 }
 
+const PANE = { plugin: 'lagoon-watch', component: 'Pane', requestId: 'lagoon-watch', props: {} as never } as const
+const run = (stdout: string, exitCode = 0, stderr = '') =>
+  ({ value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false } })
+
+// A repo at /repo whose .lagoon.yml names no project; `answer` plays the lagoon CLI.
+function machine(on: On, answer: (query: string) => ReturnType<typeof run> | 'missing') {
+  const seen = { toasts: 0, status: [] as (string | undefined)[] }
+  on('session.root', () => ({ value: '/repo' }))
+  on('session.repo', () => ({ value: { root: '/repo', remote: 'git@github.com:o/acme.git', internal: false, name: null } }))
+  on('fs.exists', () => ({ value: true }))
+  on('fs.read', () => ({ value: YML.replace("project: 'acme'\n", '') }))
+  on('clock.now', () => ({ value: SNAPSHOT.fetchedAt! }))
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.toast', () => { seen.toasts += 1; return { value: undefined } })
+  on('ui.status', ($, e) => { seen.status.push(e.text); return { value: undefined } })
+  on('process.run', ($, e) => {
+    if (e.argv[0] === 'git') return run('stage\n')
+    const result = answer(e.argv.at(-1) ?? '')
+    if (result === 'missing') throw new Error('spawn lagoon ENOENT')
+    return result
+  })
+  return seen
+}
+
+const FOUND = JSON.stringify({ projectByGitUrl: { name: 'acme' } })
+const READ = JSON.stringify({ projectByName: PROJECT })
+
 describe('pane', () => {
   test('draws each environment with its build and services', async ($, on) => {
-    on('state.get', ($, e) => ({ value: { value: e.key === 'snapshot' ? SNAPSHOT : null, version: 1 } }) as never)
-    on('clock.now', () => ({ value: SNAPSHOT.fetchedAt }))
+    machine(on, query => run(query.includes('projectByGitUrl') ? FOUND : READ))
+    await $.command.run({ command: 'lagoon', args: '' } as never)
     for (const surface of ['terminal', 'desktop'] as const) {
-      const ui = await $.ui.mount({ plugin: 'lagoon-watch', surface, component: 'Pane', requestId: 'lagoon-watch', props: {} as never, viewport: { columns: 100, rows: 40 } as never })
+      const ui = await $.ui.mount({ ...PANE, surface })
       expect(await ui.find({ type: 'Link', text: 'build log' })).toBeDefined()
       expect(await ui.find({ type: 'Link', text: 'dashboard' })).toBeDefined()
       expect(await ui.find({ text: /● running · applyingDeployments · 4m09s/ })).toBeDefined()
       expect(await ui.find({ type: 'Link', text: 'search' })).toBeDefined()
+      expect(await ui.find({ type: 'Button', key: 'refresh' })).toBeDefined()
       await ui.unmount()
     }
+  })
+
+  test('a failed lookup shows why, and Refresh recovers once the CLI works', async ($, on) => {
+    let isLoggedIn = false
+    machine(on, query => !isLoggedIn ? run('', 1, 'Error: token expired') : run(query.includes('projectByGitUrl') ? FOUND : READ))
+    await $.command.run({ command: 'lagoon', args: '' } as never)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ text: /Could not find the Lagoon project: Error: token expired/ })).toBeDefined()
+
+    isLoggedIn = true
+    await ui.press({ key: 'refresh' })
+    expect(await ui.find({ type: 'Link', text: 'build log' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a missing lagoon binary is said, not read forever', async ($, on) => {
+    machine(on, () => 'missing')
+    await $.command.run({ command: 'lagoon', args: '' } as never)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ text: /lagoon CLI unavailable/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('the first good read after a failed one announces nothing', async ($, on) => {
+    let reads = 0
+    const seen = machine(on, query => {
+      if (query.includes('projectByGitUrl')) return run(FOUND)
+      reads += 1
+      return reads === 1 ? run('', 1, 'Error: 504') : run(READ)
+    })
+    await $.command.run({ command: 'lagoon', args: '' } as never)
+    await $.command.run({ command: 'lagoon', args: '' } as never)
+    await $.command.run({ command: 'lagoon', args: '' } as never)
+    expect(reads).toBe(3)
+    expect(seen.toasts).toBe(0)
+    expect(seen.status.at(-1)).toMatch(/^Lagoon ● stage applyingDeployments/)
   })
 })
