@@ -1,11 +1,19 @@
 {
   "name": "lagoon-watch",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Pane with the Lagoon project's environments: build status, build log links, last build, and links to each service",
   "author": {
     "name": "Christophe Jossart"
   },
   "repository": "https://github.com/colorfield/claude-lagoon-watch",
   "types": "./types/index.d.ts",
-  "license": "MIT"
+  "license": "MIT",
+  "userConfig": {
+    "statusPage": {
+      "type": "string",
+      "title": "Status page",
+      "description": "A Statuspage site to show the hosting platform's status and maintenance windows from; empty turns it off.",
+      "default": "https://status.amazee.io"
+    }
+  }
 }

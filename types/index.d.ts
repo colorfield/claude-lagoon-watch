@@ -13,7 +13,8 @@ export type LagoonBuild = {
   url: string | undefined
 }
 
-export type LagoonService = { label: string; url: string }
+// `isPrimary`: the environment's main route, the one a collapsed row links.
+export type LagoonService = { label: string; url: string; isPrimary: boolean }
 
 export type LagoonEnvironment = {
   name: string
@@ -22,6 +23,8 @@ export type LagoonEnvironment = {
   // The environment the session's git branch deploys to.
   isCurrent: boolean
   title: string | undefined
+  // The cluster it runs on (`ch4.amazee.io`), as Lagoon names it.
+  cluster: string | undefined
   build: LagoonBuild | undefined
   services: LagoonService[]
 }
@@ -42,10 +45,42 @@ export type LagoonLookup =
   | { root: string; status: 'none' }
   | { root: string; status: 'error'; error: string }
 
+// Who the lagoon CLI acts as, on which of its configured instances.
+export type LagoonIdentity = {
+  instance: string | undefined
+  email: string | undefined
+  error: string | undefined
+  // The error reads as a login problem (expired token, unknown SSH key).
+  isLoggedOut: boolean
+}
+
+export type LagoonWindow = { name: string; url: string | undefined; from: number; until: number | undefined; isInProgress: boolean }
+
+// A Statuspage page (status.amazee.io): overall status, open incidents, the
+// project's cluster, and each region's next maintenance window.
+export type LagoonPlatform = {
+  name: string
+  url: string
+  indicator: string
+  description: string
+  incidents: { name: string; url: string | undefined; impact: string }[]
+  cluster: { name: string; region: string | undefined; status: string; next: LagoonWindow | undefined } | undefined
+  regions: { name: string; next: LagoonWindow | undefined }[]
+  fetchedAt: number
+  error: string | undefined
+}
+
 export type LagoonTarget = { environment: string; command: string; at: number }
 
 declare module 'claude-code' {
   interface PluginState {
-    'lagoon-watch': { lookup: LagoonLookup | null; snapshot: LagoonSnapshot | null; target: LagoonTarget | null }
+    'lagoon-watch': {
+      lookup: LagoonLookup | null
+      snapshot: LagoonSnapshot | null
+      target: LagoonTarget | null
+      identity: LagoonIdentity | null
+      platform: LagoonPlatform | null
+      isShowingRegions: boolean
+    }
   }
 }

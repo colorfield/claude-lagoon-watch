@@ -4,6 +4,7 @@ import type { LagoonBuild, LagoonBuildState, LagoonEnvironment, LagoonService, L
 // shows. Pure, so the tests read it.
 
 export const QUERY = (project: string) => `{
+  me { email }
   projectByName(name: "${project}") {
     name productionEnvironment standbyProductionEnvironment routerPattern
     environments {
@@ -84,6 +85,7 @@ export function environments(project: ApiProject, branch: string | undefined, la
       isProduction: production.has(env.name) || env.environmentType === 'production',
       isCurrent: branch !== undefined && (ref === branch || ref === `origin/${branch}` || env.name === slug(branch)),
       title: isPull && env.deployTitle ? env.deployTitle : undefined,
+      cluster: env.kubernetes?.name || undefined,
       build: build(env.deployments?.[0]),
       services: services(env, lagoonYml, generatedSuffix(project, env)),
     }
@@ -126,9 +128,10 @@ export function services(env: Pick<ApiEnvironment, 'route' | 'routes'>, lagoonYm
   const own = lagoonYml === undefined ? [] : urls.filter(url => names(lagoonYml, host(url)))
   const chosen = (own.length > 0 ? own : urls).map(url => ({ label: label(host(url)), url, isGenerated: isGenerated(host(url), suffix) }))
   const canonical = new Set(chosen.filter(one => !one.isGenerated).map(one => one.label))
+  const primary = env.route?.trim()
   return chosen
     .filter(one => !one.isGenerated || !canonical.has(one.label))
-    .map(({ label, url }) => ({ label, url }))
+    .map(({ label, url }) => ({ label, url, isPrimary: url === primary }))
     .sort((a, b) => a.label.localeCompare(b.label))
 }
 
@@ -219,4 +222,10 @@ export function elapsed(from: number | undefined, to: number): string {
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`
   if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h${String(Math.floor(seconds / 60) % 60).padStart(2, '0')}m`
   return `${Math.floor(seconds / 86_400)}d`
+}
+
+// A CLI error that a login fixes: an expired or refused token, an SSH key
+// Lagoon does not know.
+export function isLoginError(error: string): boolean {
+  return /token|unauthori[sz]ed|unauthenticated|\b40[13]\b|permission denied|publickey|ssh|login|expired/i.test(error)
 }

@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { buildState, environments, failedRead, generatedSuffix, isBaseline, lagoonTime, parseRaw, projectOf, services, targetOf } from '../hooks/lagoon'
+import { buildState, environments, failedRead, generatedSuffix, isBaseline, isLoginError, lagoonTime, parseRaw, projectOf, services, targetOf } from '../hooks/lagoon'
+import { clusterComponent, platform, windowText, zoneOf } from '../hooks/status'
 import type { LagoonSnapshot } from '../types'
 
 const YML = `docker-compose-yaml: docker-compose.yml
@@ -15,8 +16,8 @@ environments:
           - build.acme.com
       - auth:
           - auth.acme.com
-          - auth.production.acme.cluster.example.net
-          - auth-admin.production.acme.cluster.example.net
+          - auth.production.acme.ch1.example.net
+          - auth-admin.production.acme.ch1.example.net
           - auth-admin.acme.com
   stage:
     routes:
@@ -32,18 +33,18 @@ const PROJECT = {
   environments: [
     {
       name: 'dev', environmentType: 'development', deployType: 'branch', deployBaseRef: 'dev', route: 'https://cms.dev.acme.com',
-      routes: 'https://nginx.dev.acme.cluster.example.net,https://build.dev.acme.cluster.example.net',
+      routes: 'https://nginx.dev.acme.ch1.example.net,https://build.dev.acme.ch1.example.net',
       deployments: [{ name: 'lagoon-build-aaaaa', status: 'complete', buildStep: 'finalizingBuild', created: '2026-09-25 11:01:46', started: '2026-09-25 11:01:54', completed: '2026-09-25 11:18:20', uiLink: 'https://dashboard.example/projects/acme/acme-dev/deployments/lagoon-build-aaaaa' }],
     },
     {
       name: 'production', environmentType: 'production', deployType: 'branch', deployBaseRef: 'production', route: 'https://cms.acme.com',
-      routes: 'https://cms.acme.com,https://build.acme.com,https://auth.acme.com,https://auth.production.acme.cluster.example.net,https://auth-admin.production.acme.cluster.example.net,https://auth-admin.acme.com',
-      kubernetes: { name: 'cluster.example.net', routerPattern: '${environment}.${project}.cluster.example.net' },
+      routes: 'https://cms.acme.com,https://build.acme.com,https://auth.acme.com,https://auth.production.acme.ch1.example.net,https://auth-admin.production.acme.ch1.example.net,https://auth-admin.acme.com',
+      kubernetes: { name: 'ch1.example.net', routerPattern: '${environment}.${project}.ch1.example.net' },
       deployments: [{ name: 'lagoon-build-bbbbb', status: 'complete', created: '2026-10-08 16:29:54', started: '2026-10-08 16:30:02', completed: '2026-10-08 16:53:22', uiLink: 'https://dashboard.example/projects/acme/acme-production/deployments/lagoon-build-bbbbb' }],
     },
     {
       name: 'stage', environmentType: 'development', deployType: 'branch', deployBaseRef: 'stage', route: 'https://cms.stage.acme.com',
-      routes: 'https://nginx.stage.acme.cluster.example.net,https://cms.stage.acme.com,https://search.stage.acme.com',
+      routes: 'https://nginx.stage.acme.ch1.example.net,https://cms.stage.acme.com,https://search.stage.acme.com',
       deployments: [{ name: 'lagoon-build-ccccc', status: 'running', buildStep: 'applyingDeployments', created: '2026-10-12 11:35:43', started: '2026-10-12 11:35:51', completed: null, uiLink: 'https://dashboard.example/projects/acme/acme-stage/deployments/lagoon-build-ccccc' }],
     },
     {
@@ -75,7 +76,7 @@ describe('lagoon', () => {
 
   test("links the project's own domains, the generated ones only when it names none", () => {
     const stage = PROJECT.environments[2]!
-    expect(services(stage, YML)).toEqual([
+    expect(services(stage, YML).map(({ label, url }) => ({ label, url }))).toEqual([
       { label: 'cms', url: 'https://cms.stage.acme.com' },
       { label: 'search', url: 'https://search.stage.acme.com' },
     ])
@@ -86,16 +87,17 @@ describe('lagoon', () => {
   test('prefers a canonical route over the generated one of the same name', () => {
     const production = PROJECT.environments[1]!
     const suffix = generatedSuffix(PROJECT, production)
-    expect(suffix).toBe('production.acme.cluster.example.net')
-    expect(services(production, YML, suffix)).toEqual([
+    expect(suffix).toBe('production.acme.ch1.example.net')
+    expect(services(production, YML, suffix).map(({ label, url }) => ({ label, url }))).toEqual([
       { label: 'auth', url: 'https://auth.acme.com' },
       { label: 'auth-admin', url: 'https://auth-admin.acme.com' },
       { label: 'build', url: 'https://build.acme.com' },
       { label: 'cms', url: 'https://cms.acme.com' },
     ])
     // A generated route with no canonical twin stays.
-    expect(services({ route: null, routes: 'https://nginx.dev.acme.cluster.example.net,https://cms.dev.acme.com' }, undefined, 'dev.acme.cluster.example.net'))
-      .toEqual([{ label: 'cms', url: 'https://cms.dev.acme.com' }, { label: 'nginx', url: 'https://nginx.dev.acme.cluster.example.net' }])
+    expect(services({ route: null, routes: 'https://nginx.dev.acme.ch1.example.net,https://cms.dev.acme.com' }, undefined, 'dev.acme.ch1.example.net').map(one => one.label))
+      .toEqual(['cms', 'nginx'])
+    expect(services(production, YML, suffix).find(one => one.isPrimary)?.url).toBe('https://cms.acme.com')
   })
 
   test('reads statuses and UTC times', () => {
@@ -136,6 +138,56 @@ describe('lagoon', () => {
   })
 })
 
+const SUMMARY = JSON.stringify({
+  page: { name: 'Example Hosting', url: 'https://status.example.com' },
+  status: { indicator: 'none', description: 'All Systems Operational' },
+  components: [
+    { id: 'g0', name: 'General', status: 'operational', group: true },
+    { id: 'g1', name: 'Switzerland', status: 'operational', group: true },
+    { id: 'g2', name: 'Germany', status: 'operational', group: true },
+    { id: 'c0', name: 'Lagoon API', status: 'operational', group_id: 'g0' },
+    { id: 'c1', name: 'ch1.lagoon', status: 'operational', group_id: 'g1' },
+    { id: 'c2', name: 'de1.lagoon', status: 'degraded_performance', group_id: 'g2' },
+  ],
+  incidents: [
+    { name: 'Slow builds', impact: 'minor', status: 'investigating', shortlink: 'https://stspg.example/1' },
+    { name: 'Old outage', impact: 'major', status: 'resolved' },
+  ],
+  scheduled_maintenances: [
+    { name: 'Maintenance EMEA', status: 'scheduled', scheduled_for: '2026-10-14T21:00:00Z', scheduled_until: '2026-10-15T02:00:00Z', components: [{ id: 'c1', name: 'ch1.lagoon' }] },
+    { name: 'Maintenance EMEA', status: 'scheduled', scheduled_for: '2026-10-13T21:00:00Z', scheduled_until: '2026-10-14T02:00:00Z', shortlink: 'https://stspg.example/2', components: [{ id: 'c0', name: 'Lagoon API' }, { id: 'c1', name: 'ch1.lagoon' }] },
+  ],
+})
+
+describe('status page', () => {
+  test("reads the overall status, open incidents, the project's cluster and each region's next window", () => {
+    const read = platform(SUMMARY, 'ch1.example.net', Date.parse('2026-10-12T12:00:00Z'))
+    expect(read.description).toBe('All Systems Operational')
+    expect(read.incidents.map(one => one.name)).toEqual(['Slow builds'])
+    expect(read.cluster).toMatchObject({ name: 'ch1.lagoon', region: 'Switzerland', status: 'operational' })
+    expect(read.cluster?.next?.from).toBe(Date.parse('2026-10-13T21:00:00Z'))
+    expect(read.regions.map(one => [one.name, one.next?.url])).toEqual([
+      ['General', 'https://stspg.example/2'],
+      ['Switzerland', 'https://stspg.example/2'],
+      ['Germany', undefined],
+    ])
+  })
+
+  test("tells a window in the person's zone, and one that runs", () => {
+    const window = { name: 'm', url: undefined, from: Date.parse('2026-10-13T21:00:00Z'), until: Date.parse('2026-10-14T02:00:00Z'), isInProgress: false }
+    expect(windowText(window, 'Europe/Zurich')).toBe('Tue 13 Oct 23:00–04:00')
+    expect(windowText({ ...window, isInProgress: true }, 'Europe/Zurich')).toBe('in progress until 04:00')
+    expect(zoneOf('/var/db/timezone/zoneinfo/Europe/Zurich')).toBe('Europe/Zurich')
+    expect(clusterComponent([{ name: 'de1.lagoon' }, { name: 'ch1.lagoon' }], 'ch1.example.net')?.name).toBe('ch1.lagoon')
+  })
+
+  test('knows a login problem when it reads one', () => {
+    expect(isLoginError('Error: token expired')).toBe(true)
+    expect(isLoginError('ssh: handshake failed: ssh: unable to authenticate, attempted methods [none publickey]')).toBe(true)
+    expect(isLoginError('Error: 504 Gateway Timeout')).toBe(false)
+  })
+})
+
 const SNAPSHOT: LagoonSnapshot = {
   project: 'acme',
   environments: environments(PROJECT, 'stage', YML),
@@ -158,8 +210,11 @@ function machine(on: On, answer: (query: string) => ReturnType<typeof run> | 'mi
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
   on('ui.toast', () => { seen.toasts += 1; return { value: undefined } })
   on('ui.status', ($, e) => { seen.status.push(e.text); return { value: undefined } })
+  on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: SUMMARY } }) as never)
+  on('fs.stat', () => ({ value: { realPath: '/usr/share/zoneinfo/Europe/Zurich' } }) as never)
   on('process.run', ($, e) => {
     if (e.argv[0] === 'git') return run('stage\n')
+    if (e.argv[1] === 'config') return run('example\n')
     const result = answer(e.argv.at(-1) ?? '')
     if (result === 'missing') throw new Error('spawn lagoon ENOENT')
     return result
@@ -168,7 +223,7 @@ function machine(on: On, answer: (query: string) => ReturnType<typeof run> | 'mi
 }
 
 const FOUND = JSON.stringify({ projectByGitUrl: { name: 'acme' } })
-const READ = JSON.stringify({ projectByName: PROJECT })
+const READ = JSON.stringify({ me: { email: 'dev@example.com' }, projectByName: PROJECT })
 
 describe('pane', () => {
   test('draws each environment with its build and services', async ($, on) => {
@@ -178,9 +233,16 @@ describe('pane', () => {
       const ui = await $.ui.mount({ ...PANE, surface })
       expect(await ui.find({ type: 'Link', text: 'build log' })).toBeDefined()
       expect(await ui.find({ type: 'Link', text: 'dashboard' })).toBeDefined()
-      expect(await ui.find({ text: /● running · applyingDeployments · 4m09s/ })).toBeDefined()
+      expect(await ui.find({ text: /● applyingDeployments · 4m09s/ })).toBeDefined()
       expect(await ui.find({ type: 'Link', text: 'search' })).toBeDefined()
       expect(await ui.find({ type: 'Button', key: 'refresh' })).toBeDefined()
+      expect(await ui.find({ text: /dev@example\.com · example/ })).toBeDefined()
+      expect(await ui.find({ type: 'Link', text: 'Example Hosting' })).toBeDefined()
+      expect(await ui.find({ text: /ch1\.lagoon \(this project\): maintenance/ })).toBeDefined()
+      expect(await ui.find({ text: /Germany/ })).toBeUndefined()
+      await ui.press({ key: 'regions' })
+      expect(await ui.find({ text: /Germany\s+none planned/ })).toBeDefined()
+      await ui.press({ key: 'regions' })
       await ui.unmount()
     }
   })
@@ -191,10 +253,13 @@ describe('pane', () => {
     await $.command.run({ command: 'lagoon', args: '' } as never)
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
     expect(await ui.find({ text: /Could not find the Lagoon project: Error: token expired/ })).toBeDefined()
+    expect(await ui.find({ text: /Not logged in to Lagoon \(example\)/ })).toBeDefined()
+    expect(await ui.find({ text: /lagoon login/ })).toBeDefined()
 
     isLoggedIn = true
     await ui.press({ key: 'refresh' })
     expect(await ui.find({ type: 'Link', text: 'build log' })).toBeDefined()
+    expect(await ui.find({ text: /Not logged in/ })).toBeUndefined()
     await ui.unmount()
   })
 
