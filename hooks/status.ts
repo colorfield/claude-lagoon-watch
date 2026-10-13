@@ -48,6 +48,10 @@ export function platform(json: string, cluster: string | undefined, now: number)
     url: webUrl(summary.page.url) ?? '',
     indicator: summary.status.indicator,
     description: summary.status.description,
+    // The page says "Service Under Maintenance" while any region is: name which.
+    inMaintenance: [...new Set(windows
+      .filter(({ window }) => window.isInProgress)
+      .flatMap(({ maintenance }) => maintenance.components.map(one => one.name)))],
     incidents: summary.incidents
       .filter(one => one.status !== 'resolved' && one.status !== 'postmortem')
       .map(one => ({ name: one.name, url: webUrl(one.shortlink), impact: one.impact })),

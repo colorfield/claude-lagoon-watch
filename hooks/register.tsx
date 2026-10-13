@@ -147,16 +147,31 @@ export const register: Register = (on, options) => {
           </Box>
         )
 
+    // The page is "Under Maintenance" while any region is. With this project's
+    // cluster known and clear, that maintenance is told as elsewhere, dimmed.
+    const isMaintenanceElsewhere = status?.indicator === 'maintenance' && ownCluster !== undefined
+      && ownCluster.status === 'operational' && ownCluster.next?.isInProgress !== true
+    const where = status === null || status.indicator !== 'maintenance' || status.inMaintenance.length === 0
+      ? ''
+      : status.inMaintenance.join(', ')
+
     const platformBlock = status === null ? null : (
       <Box flexDirection="column">
         {status.error !== undefined
           ? <Text color="warning" wrap="truncate-end">⚠ {status.url}: {status.error}</Text>
-          : (
-            <Text wrap="truncate-end">
-              <Text color={(INDICATOR[status.indicator] ?? INDICATOR.minor!).color}>{(INDICATOR[status.indicator] ?? INDICATOR.minor!).icon}</Text>
-              {' '}<Link href={status.url} label={status.name} />: {status.description}
-            </Text>
-          )}
+          : isMaintenanceElsewhere
+            ? (
+              <Text wrap="truncate-end">
+                <Text dimColor>{INDICATOR.maintenance!.icon}</Text>
+                {' '}<Link href={status.url} label={status.name} />: <Text dimColor>maintenance elsewhere{where === '' ? '' : `: ${where}`}</Text>
+              </Text>
+            )
+            : (
+              <Text wrap="truncate-end">
+                <Text color={(INDICATOR[status.indicator] ?? INDICATOR.minor!).color}>{(INDICATOR[status.indicator] ?? INDICATOR.minor!).icon}</Text>
+                {' '}<Link href={status.url} label={status.name} />: {status.description}{where === '' ? '' : ` (${where})`}
+              </Text>
+            )}
         {status.incidents.map(incident => (
           <Text key={incident.name} color="error" wrap="truncate-end">
             {'  '}! {incident.url === undefined ? incident.name : <Link href={incident.url} label={incident.name} />}
@@ -168,7 +183,9 @@ export const register: Register = (on, options) => {
             {ownCluster.status === 'operational' ? '' : <Text color="warning">{componentText(ownCluster.status)} · </Text>}
             {ownCluster.next === undefined
               ? <Text dimColor>no maintenance planned</Text>
-              : <Text color={ownCluster.next.isInProgress ? 'warning' : undefined}>maintenance {windowText(ownCluster.next, timeZone)}</Text>}
+              : ownCluster.next.isInProgress
+                ? <Text color="warning">maintenance {windowText(ownCluster.next, timeZone)}</Text>
+                : <Text>next maintenance {windowText(ownCluster.next, timeZone)} <Text dimColor>· in {elapsed(now, ownCluster.next.from)}</Text></Text>}
           </Text>
         )}
         {status.regions.length > 0 && (
@@ -465,7 +482,7 @@ async function pollPlatform($: EngineInterface, now: number) {
 
 function failedPlatform(previous: LagoonPlatform | null, error: string, now: number): LagoonPlatform {
   return previous === null
-    ? { name: statusPage, url: statusPage, indicator: 'minor', description: '', incidents: [], cluster: undefined, clusterKey: undefined, regions: [], fetchedAt: now, error }
+    ? { name: statusPage, url: statusPage, indicator: 'minor', description: '', inMaintenance: [], incidents: [], cluster: undefined, clusterKey: undefined, regions: [], fetchedAt: now, error }
     : { ...previous, error }
 }
 

@@ -182,6 +182,15 @@ const SUMMARY = JSON.stringify({
   ],
 })
 
+// The page while a maintenance runs on `component` (c1 is ch1.lagoon, c2 de1.lagoon).
+function underMaintenance(component: { id: string; name: string }, status = 'under_maintenance') {
+  const page = JSON.parse(SUMMARY) as { status: object; components: { id: string; status: string }[]; scheduled_maintenances: object[] }
+  page.status = { indicator: 'maintenance', description: 'Service Under Maintenance' }
+  page.components.find(one => one.id === component.id)!.status = status
+  page.scheduled_maintenances.push({ name: 'Maintenance now', status: 'in_progress', scheduled_for: '2026-10-12T10:00:00Z', scheduled_until: '2026-10-12T14:00:00Z', components: [component] })
+  return JSON.stringify(page)
+}
+
 describe('status page', () => {
   test("reads the overall status, open incidents, the project's cluster and each region's next window", () => {
     const read = platform(SUMMARY, 'ch1.example.net', Date.parse('2026-10-12T12:00:00Z'))
@@ -194,6 +203,11 @@ describe('status page', () => {
       ['Switzerland', 'https://stspg.example/2'],
       ['Germany', undefined],
     ])
+  })
+
+  test('names what a maintenance runs on now', () => {
+    expect(platform(SUMMARY, 'ch1.example.net', Date.parse('2026-10-12T12:00:00Z')).inMaintenance).toEqual([])
+    expect(platform(underMaintenance({ id: 'c2', name: 'de1.lagoon' }), 'ch1.example.net', Date.parse('2026-10-12T12:00:00Z')).inMaintenance).toEqual(['de1.lagoon'])
   })
 
   test("tells a window in the person's zone, and one that runs", () => {
@@ -281,7 +295,7 @@ const run = (stdout: string, exitCode = 0, stderr = '') =>
 
 // The machine the mod runs on: a repo at `world.root`, whose .lagoon.yml
 // names no project unless `world.project` is set; `answer` plays the lagoon CLI.
-type World = { root: string; project?: string; hasYml: boolean; remote: string | null; isHanging: boolean }
+type World = { root: string; project?: string; hasYml: boolean; remote: string | null; isHanging: boolean; statusPage?: string }
 
 function machine(on: On, answer: (query: string) => ReturnType<typeof run> | 'missing', world: World = { root: '/repo', hasYml: true, remote: 'git@github.com:o/acme.git', isHanging: false }) {
   const seen = { toasts: 0, status: [] as (string | undefined)[], queries: [] as string[] }
@@ -294,7 +308,7 @@ function machine(on: On, answer: (query: string) => ReturnType<typeof run> | 'mi
   on('ui.panes', () => ({ value: [] }) as never)
   on('ui.toast', () => { seen.toasts += 1; return { value: undefined } })
   on('ui.status', ($, e) => { seen.status.push(e.text); return { value: undefined } })
-  on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: SUMMARY } }) as never)
+  on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: world.statusPage ?? SUMMARY } }) as never)
   on('fs.stat', () => ({ value: { realPath: '/usr/share/zoneinfo/Europe/Zurich' } }) as never)
   on('process.run', ($, e) => {
     if (e.argv[0] === 'git') return run('stage\n')
@@ -332,13 +346,31 @@ describe('pane', () => {
       expect(await ui.find({ type: 'Link', text: 'search' })).toBeDefined()
       expect(await ui.find({ text: /dev@example\.com · example/ })).toBeDefined()
       expect(await ui.find({ type: 'Link', text: 'Example Hosting' })).toBeDefined()
-      expect(await ui.find({ text: /ch1\.lagoon \(this project\): maintenance/ })).toBeDefined()
+      expect(await ui.find({ text: /ch1\.lagoon \(this project\): next maintenance Tue 13 Oct 23:00–04:00 · in 1d/ })).toBeDefined()
       expect(await ui.find({ text: /Germany/ })).toBeUndefined()
       await ui.press({ key: 'regions' })
       expect(await ui.find({ text: /Germany\s+none planned/ })).toBeDefined()
       await ui.press({ key: 'regions' })
       await ui.unmount()
     }
+  })
+
+  test("a maintenance elsewhere is told as elsewhere, not as this project's", async ($, on) => {
+    machine(on, lagoonCli, { root: '/repo', hasYml: true, remote: 'git@github.com:o/acme.git', isHanging: false, statusPage: underMaintenance({ id: 'c2', name: 'de1.lagoon' }) })
+    const ui = await openPane($)
+    expect(await ui.find({ text: /maintenance elsewhere: de1\.lagoon/ })).toBeDefined()
+    expect(await ui.find({ text: /Service Under Maintenance/ })).toBeUndefined()
+    expect(await ui.find({ text: /ch1\.lagoon \(this project\): next maintenance/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test("a maintenance on this project's cluster is told as running", async ($, on) => {
+    machine(on, lagoonCli, { root: '/repo', hasYml: true, remote: 'git@github.com:o/acme.git', isHanging: false, statusPage: underMaintenance({ id: 'c1', name: 'ch1.lagoon' }) })
+    const ui = await openPane($)
+    expect(await ui.find({ text: /Service Under Maintenance \(ch1\.lagoon\)/ })).toBeDefined()
+    expect(await ui.find({ text: /ch1\.lagoon \(this project\): under maintenance · maintenance in progress until 16:00/ })).toBeDefined()
+    expect(await ui.find({ text: /elsewhere/ })).toBeUndefined()
+    await ui.unmount()
   })
 
   test('a failed lookup shows why, and Refresh recovers once the CLI works', async ($, on) => {

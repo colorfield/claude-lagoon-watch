@@ -94,8 +94,8 @@ Builds are compared against the previous good read of the same project; the firs
 
 When the `statusPage` option is set (default `https://status.amazee.io`, empty turns it off), the mod reads `<statusPage>/api/v2/summary.json`, a standard [Statuspage](https://www.atlassian.com/software/statuspage) summary:
 
-- the overall status and open incidents;
-- the project's cluster (e.g. `ch4.amazee.io` → component `ch4.lagoon`), its status and next maintenance window;
+- the overall status and open incidents. A Statuspage page reads "Service Under Maintenance" while a maintenance runs in any region, so the pane names what it runs on (`au2.lagoon, APAC`); when the project's cluster is known and not part of it, the line is dimmed and says `maintenance elsewhere`;
+- the project's cluster (e.g. `ch4.amazee.io` → component `ch4.lagoon`), its status and its maintenance: `next maintenance <window> · in <time>` while scheduled, `maintenance in progress until <time>` (warning) while it runs;
 - every region's next window, on demand (`g`), with the project's region first.
 
 Times show in the local time zone (`/etc/localtime`, else `TZ`).
