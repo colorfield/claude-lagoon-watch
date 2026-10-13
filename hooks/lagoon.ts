@@ -334,6 +334,55 @@ export function gitUrlCandidates(remote: string): string[] {
   return [...new Set([clean, other].filter((one): one is string => one !== undefined))]
 }
 
+// The repository a git URL names, as `host/path` in lowercase, whatever its
+// form (scp-like SSH, ssh://, https): user, port and `.git` dropped, so two
+// spellings of one repository compare equal.
+export function repoKey(url: string | null | undefined): string | undefined {
+  const clean = url?.trim().toLowerCase() ?? ''
+  const full = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+?)(?:\.git)?\/?$/.exec(clean)
+  const scp = /^(?:[^@/:]+@)?([^:/]+):(?!\/)(.+?)(?:\.git)?\/?$/.exec(clean)
+  const match = full ?? scp
+  return match ? `${match[1]}/${match[2]}` : undefined
+}
+
+export function isSameRepo(a: string | null | undefined, b: string | null | undefined): boolean {
+  const key = repoKey(a)
+  return key !== undefined && key === repoKey(b)
+}
+
+// A name as Lagoon would spell it (`Acme_Site` -> `acme-site`), or undefined.
+export function asProjectName(raw: string): string | undefined {
+  const name = raw.trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')
+  return isProjectName(name) ? name : undefined
+}
+
+export type ProjectHint = { name: string; source: string }
+
+// The project names the repo's own files suggest, most telling first. Each is
+// a guess until Lagoon confirms it: a compose file's LAGOON_PROJECT is often
+// the local project's name, not the Lagoon one.
+// - a Drush site alias: `user: acme-${env-name}`
+// - LAGOON_PROJECT in a compose or env file (`${VAR:-acme}` gives its default)
+// - the repository's own name, from the git remote
+export function projectHints(files: readonly { path: string; text: string }[], remote: string | null | undefined): ProjectHint[] {
+  const hints: ProjectHint[] = []
+  const add = (raw: string | undefined, source: string) => {
+    const name = raw === undefined ? undefined : asProjectName(raw)
+    if (name !== undefined && !hints.some(hint => hint.name === name)) hints.push({ name, source })
+  }
+  for (const file of files.filter(one => one.path.endsWith('.site.yml'))) {
+    for (const match of file.text.matchAll(/^\s*user:\s*['"]?([A-Za-z0-9_-]+)-\$\{env-name\}/gm)) add(match[1], 'Drush alias')
+  }
+  for (const file of files.filter(one => !one.path.endsWith('.site.yml'))) {
+    for (const match of file.text.matchAll(/^[\s-]*LAGOON_PROJECT\s*[:=]\s*(?:&\S+\s+)?['"]?([^'"\s#]+)/gm)) {
+      const value = match[1]!
+      add(value.startsWith('$') ? /^\$\{\w+:?-([^}]+)\}$/.exec(value)?.[1] : value, 'LAGOON_PROJECT')
+    }
+  }
+  add(repoKey(remote)?.split('/').at(-1), 'repository name')
+  return hints
+}
+
 // A link from an answer we do not control (the Lagoon API, a status page) is
 // drawn clickable only when it is a web address: never file:, javascript: or
 // an app's own scheme.

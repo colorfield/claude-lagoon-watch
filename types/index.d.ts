@@ -38,11 +38,16 @@ export type LagoonSnapshot = {
   error: string | undefined
 }
 
-// Which Lagoon project the session's root deploys to.
+// A project the repo's files name, which Lagoon has but could not tie to this
+// repo's git remote: offered, never taken unasked. `source`: where it was read.
+export type LagoonSuggestion = { name: string; source: string }
+
+// Which Lagoon project the session's root deploys to. `isChosen`: the person
+// set it (`/lagoon <project>`), not .lagoon.yml or the git remote.
 export type LagoonLookup =
   | { root: string; status: 'pending' }
-  | { root: string; status: 'found'; project: string }
-  | { root: string; status: 'none' }
+  | { root: string; status: 'found'; project: string; isChosen: boolean }
+  | { root: string; status: 'none'; suggestions: LagoonSuggestion[] }
   | { root: string; status: 'error'; error: string }
 
 // Who the lagoon CLI acts as, on which of its configured instances.

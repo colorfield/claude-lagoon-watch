@@ -1,8 +1,8 @@
-import { describe, expect, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { buildState, environments, failedRead, generatedSuffix, isBaseline, gitUrlCandidates, isLoginError, lagoonCommand, lagoonTime, parseRaw, projectOf, services, simpleCommands, webUrl } from '../hooks/lagoon'
+import { asProjectName, buildState, environments, failedRead, generatedSuffix, isBaseline, isSameRepo, gitUrlCandidates, isLoginError, lagoonCommand, lagoonTime, parseRaw, projectHints, projectOf, repoKey, services, simpleCommands, webUrl } from '../hooks/lagoon'
 import { clusterComponent, platform, windowText, zoneOf } from '../hooks/status'
 import type { LagoonSnapshot } from '../types'
 
@@ -223,6 +223,34 @@ describe('status page', () => {
     expect(gitUrlCandidates('ssh://git:hunter2@github.com/o/acme.git')).toEqual(['ssh://git@github.com/o/acme.git', 'https://github.com/o/acme.git'])
   })
 
+  test('knows one repository under any of its git URL spellings', () => {
+    expect(repoKey('git@github.com:O/Acme.git')).toBe('github.com/o/acme')
+    expect(repoKey('https://github.com/o/acme')).toBe('github.com/o/acme')
+    expect(repoKey('ssh://git@github.com:22/o/acme.git/')).toBe('github.com/o/acme')
+    expect(isSameRepo('git@github.com:o/acme.git', 'https://github.com/o/acme.git')).toBe(true)
+    expect(isSameRepo('git@github.com:o/acme.git', 'git@github.com:o/acme-site.git')).toBe(false)
+    expect(isSameRepo(undefined, undefined)).toBe(false)
+  })
+
+  test("reads the project names the repo's files suggest, most telling first", () => {
+    const files = [
+      { path: '/r/docker-compose.yml', text: 'x-environment:\n  LAGOON_PROJECT: &lagoon-project ${COMPOSE_PROJECT_NAME:-acme_local}\n' },
+      { path: '/r/apps/cms/drush/sites/self.site.yml', text: "'*':\n  host: ssh.lagoon.example\n  user: acme-${env-name}\n" },
+      // The generic alias names no project.
+      { path: '/r/apps/cms/drush/sites/lagoon.site.yml', text: "'*':\n  user: ${env-name}\n" },
+      { path: '/r/.env', text: 'LAGOON_PROJECT=acme\nLAGOON_PROJECT=$UNSET\n' },
+    ]
+    expect(projectHints(files, 'https://github.com/o/Acme_Site.git')).toEqual([
+      { name: 'acme', source: 'Drush alias' },
+      { name: 'acme-local', source: 'LAGOON_PROJECT' },
+      { name: 'acme-site', source: 'repository name' },
+    ])
+    expect(projectHints([], null)).toEqual([])
+    expect(asProjectName('  Acme_Site ')).toBe('acme-site')
+    expect(asProjectName('"} evil {"')).toBe('evil')
+    expect(asProjectName('___')).toBeUndefined()
+  })
+
   test('links only web addresses from answers it does not control', () => {
     expect(webUrl('https://dashboard.example/x')).toBe('https://dashboard.example/x')
     expect(webUrl('javascript:alert(1)')).toBeUndefined()
@@ -344,6 +372,68 @@ describe('pane', () => {
     await ui.unmount()
   })
 
+  // Lagoon answers a git URL it does not know with an error, not null.
+  test('finds the project under the other form of the remote when Lagoon errors on the first', async ($, on) => {
+    const seen = machine(on, query => query.includes('projectByGitUrl')
+      ? query.includes('"git@github.com:o/acme.git"') ? run(FOUND) : run('', 1, "Error: graphql: Cannot read properties of undefined (reading 'id')")
+      : run(READ), { root: '/repo', hasYml: false, remote: 'https://github.com/o/acme.git', isHanging: false })
+    const ui = await openPane($)
+    expect(await ui.find({ type: 'Link', text: 'build log' })).toBeDefined()
+    expect(await ui.find({ text: /Could not find/ })).toBeUndefined()
+    expect(seen.queries.filter(query => query.includes('projectByGitUrl'))).toHaveLength(2)
+    await ui.unmount()
+  })
+
+  test("takes a project the repo's files name once Lagoon gives this repo as its git URL", async ($, on) => {
+    mock.store(on)
+    machine(on, query => query.includes('projectByGitUrl')
+      ? run('', 1, "Error: graphql: Cannot read properties of undefined (reading 'id')")
+      : query.includes('{ me {') ? run(JSON.stringify({ me: { email: 'dev@example.com' } }))
+      : query.includes('gitUrl }') ? run(JSON.stringify({ projectByName: { name: 'acme-site', gitUrl: 'ssh://git@github.com/o/acme_site.git' } }))
+      : run(READ), { root: '/repo', hasYml: false, remote: 'https://github.com/o/acme_site.git', isHanging: false })
+    const ui = await openPane($)
+    expect(await ui.find({ text: /^acme-site/ })).toBeDefined()
+    expect(await ui.find({ text: /set by \/lagoon/ })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('only offers a name Lagoon cannot tie to this repo, and keeps the one the person sets', async ($, on) => {
+    mock.store(on)
+    const world: World = { root: '/repo', hasYml: false, remote: 'https://github.com/o/acme_site.git', isHanging: false }
+    machine(on, query => query.includes('projectByGitUrl')
+      ? run('', 1, "Error: graphql: Cannot read properties of undefined (reading 'id')")
+      : query.includes('{ me {') ? run(JSON.stringify({ me: { email: 'dev@example.com' } }))
+      : query.includes('gitUrl }') ? run(JSON.stringify({ projectByName: { name: 'acme-site', gitUrl: 'git@github.com:elsewhere/acme-site.git' } }))
+      : run(READ), world)
+    const ui = await openPane($)
+    expect(await ui.find({ text: /No Lagoon project found for this repo/ })).toBeDefined()
+    expect(await ui.find({ text: /Maybe acme-site \(repository name\)/ })).toBeDefined()
+    expect(await ui.find({ type: 'Button', text: 'Choose project' })).toBeDefined()
+
+    await $.command.run({ command: 'lagoon', args: 'acme-site' } as never)
+    await ui.press({ key: 'refresh' })
+    expect(await ui.find({ text: /set by \/lagoon/ })).toBeDefined()
+
+    // Kept for the repository: another worktree of it has it too.
+    world.root = '/repo-worktree'
+    await ui.press({ key: 'refresh' })
+    expect(await ui.find({ text: /^acme-site.*set by \/lagoon/ })).toBeDefined()
+
+    await $.command.run({ command: 'lagoon', args: '--forget' } as never)
+    await ui.press({ key: 'refresh' })
+    expect(await ui.find({ text: /Maybe acme-site/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a CLI that cannot answer at all is an error, never "no project"', async ($, on) => {
+    machine(on, () => run('', 1, 'ssh: connect to host ssh.lagoon.example port 32222: Operation timed out'),
+      { root: '/repo', hasYml: false, remote: 'https://github.com/o/acme.git', isHanging: false })
+    const ui = await openPane($)
+    expect(await ui.find({ text: /Could not find the Lagoon project: ssh: connect to host/ })).toBeDefined()
+    expect(await ui.find({ text: /No Lagoon project found/ })).toBeUndefined()
+    await ui.unmount()
+  })
+
   test("shows the command Claude last ran on an environment, and how it went", async ($, on) => {
     machine(on, lagoonCli)
     let isFailing = true
@@ -383,7 +473,7 @@ describe('pane', () => {
 
     Object.assign(world, { root: '/plain', project: undefined, hasYml: false })
     await ui.press({ key: 'refresh' })
-    expect(await ui.find({ text: /No \.lagoon\.yml here/ })).toBeDefined()
+    expect(await ui.find({ text: /No Lagoon project found for this repo/ })).toBeDefined()
     expect(await ui.find({ text: /\(this project\)/ })).toBeUndefined()
     await ui.unmount()
   })

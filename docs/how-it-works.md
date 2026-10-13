@@ -14,7 +14,9 @@ The only direct HTTP request goes to the platform status page (see [Platform sta
 
 | Command | When | Why |
 |---|---|---|
-| `lagoon raw --raw '{ projectByGitUrl(gitUrl: "…") { name } }'` | No `project:` in `.lagoon.yml` | Find the project from the git remote |
+| `lagoon raw --raw '{ projectByGitUrl(gitUrl: "…") { name } }'` | No `project:` in `.lagoon.yml`, none chosen | Find the project from the git remote |
+| `lagoon raw --raw '{ me { email } }'` | Every form of the remote was refused | Tell "no such project" from a CLI that cannot answer |
+| `lagoon raw --raw '{ projectByName(name: "…") { name gitUrl } }'` | A name the repo's files suggest, or one you set | Check the project exists, and whether it builds from this repo |
 | `lagoon raw --raw '<project query>'` | Each read | Environments, latest builds, routes, and who you are |
 | `lagoon config current` | Each read (local, no network) | The instance shown next to your identity |
 | `git branch --show-current` | Each read | Mark the current branch's environment |
@@ -39,11 +41,22 @@ Values spliced into a query are checked first: a project name must match `^[a-z0
 
 ## Finding the project
 
-1. `project:` at the top level of `.lagoon.yml` in the session's root.
-2. Otherwise the git remote, with any credentials stripped (`https://user:token@…`, `ssh://user:password@…`), tried as written and in its other form (SSH ↔ https), against `projectByGitUrl`.
-3. No match: the pane says so, and the lookup runs again every 10 min.
+The repo's name is never taken for the project's: `acme_site` may deploy to `acme-site`, or to something else entirely. In order:
 
-A failed lookup (CLI error, not logged in) is an error to retry, never taken as "no project". After a `/cd` to another repo, the project is looked up again, and the previous project's data is never shown for the new one.
+1. `project:` at the top level of `.lagoon.yml` in the session's root.
+2. The project you set for this repo with `/lagoon <project>`. It is kept across sessions, per repository (its git remote, so every worktree shares it), and the pane marks it `(set by /lagoon)`. `/lagoon --forget` unsets it.
+3. The git remote, with any credentials stripped (`https://user:token@…`, `ssh://user:password@…`), tried as written and in its other form (SSH ↔ https), against `projectByGitUrl`. Lagoon answers a URL it does not know with an error (`Cannot read properties of undefined (reading 'id')`), not `null`, so a refused form does not stop the next one.
+4. Names the repo's files suggest, each checked with `projectByName`:
+   - a Drush site alias, `drush/sites/*.site.yml` at the root or up to two folders down (`apps/cms/drush/sites`): `user: <project>-${env-name}`;
+   - `LAGOON_PROJECT` in `docker-compose.yml` (or `compose.yml`), `.env`, `.lagoon.env`, a `${VAR:-default}` giving its default;
+   - the repository's name in the git remote.
+
+   Each is spelled as Lagoon would (`acme_site` → `acme-site`). One is taken only when Lagoon gives its git URL as this repo's (any spelling: SSH, `ssh://`, https, with or without `.git`). A compose file's `LAGOON_PROJECT` is often the local project's name, so a name is never taken on the files' word alone.
+5. Otherwise the pane says no project was found and offers the names Lagoon has (`Maybe acme-site (repository name)`): **Choose project** (`p`) asks which one, or lets you type another; `/lagoon` asks at once. A name you give is checked with Lagoon before it is kept. With nothing to offer, `/lagoon <project>` sets it. The lookup runs again every 10 min.
+
+A failed lookup (CLI error, not logged in) is an error to retry, never taken as "no project": when every form of the remote is refused, `{ me { email } }` tells which. After a `/cd` to another repo, the project is looked up again, and the previous project's data is never shown for the new one.
+
+Drupal settings files are not read: they are PHP, and the project name in them is either read from the `LAGOON_PROJECT` environment variable at runtime or part of a hostname.
 
 ## What the pane shows
 
