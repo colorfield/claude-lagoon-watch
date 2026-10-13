@@ -68,6 +68,8 @@ export type LagoonPlatform = {
   url: string
   indicator: string
   description: string
+  // The components a maintenance runs on now (`au2.lagoon`, `APAC`).
+  inMaintenance: string[]
   incidents: { name: string; url: string | undefined; impact: string }[]
   cluster: { name: string; region: string | undefined; status: string; next: LagoonWindow | undefined } | undefined
   // The Lagoon cluster the page was read for (`ch4.amazee.io`).
