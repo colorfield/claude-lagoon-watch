@@ -1,20 +1,24 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { LagoonEnvironment, LagoonIdentity, LagoonLookup, LagoonPlatform, LagoonSnapshot } from '../types'
+import type { LagoonEnvironment, LagoonIdentity, LagoonLookup, LagoonPlatform, LagoonSnapshot, LagoonSuggestion } from '../types'
 import {
+  asProjectName,
   elapsed,
   environments,
   failedRead,
   firstLine,
   isBaseline,
+  isSameRepo,
   gitUrlCandidates,
   isLoginError,
   isProjectName,
   lagoonCommand,
   parseRaw,
+  projectHints,
   projectOf,
   QUERY,
+  repoKey,
 } from './lagoon'
 import { componentText, INDICATOR, platform as readPlatform, windowText, zoneOf } from './status'
 
@@ -66,7 +70,11 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    await $.command.register({ name: 'lagoon', description: 'Show the Lagoon environments, builds and services of this project' })
+    await $.command.register({
+      name: 'lagoon',
+      description: 'Show the Lagoon environments, builds and services of this project; with a name, set the project for this repo',
+      argumentHint: '[project | --forget]',
+    })
     timeZone = await localZone($)
     nextAt = 0
     nextStatusAt = 0
@@ -77,9 +85,11 @@ export const register: Register = (on, options) => {
   })
 
   // The pane opens at once (it says it is reading); the read runs behind it.
-  on('command.run', { command: 'lagoon' }, async $ => {
+  // `/lagoon <project>` sets the project for this repo, `--forget` unsets it.
+  on('command.run', { command: 'lagoon' }, async ($, e) => {
     const opened = await $.ui.open({ id: PANE, title: 'Lagoon' })
-    background(refresh($))
+    const arg = e.args.trim()
+    background(arg === '--forget' ? forget($) : arg !== '' ? choose($, arg) : refreshAndAsk($))
     return { text: opened.isPlaced ? 'Lagoon pane opened.' : 'Lagoon pane waits for a wider terminal.' }
   })
 
@@ -199,12 +209,27 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
+    if (found.status === 'none') {
+      const { suggestions } = found
+      return (
+        <Box flexDirection="column">
+          <Text dimColor wrap="wrap">No Lagoon project found for this repo: .lagoon.yml names none, and none builds from its git remote.</Text>
+          {suggestions.length > 0 && (
+            <Text wrap="wrap">Maybe {suggestions.map(one => `${one.name} (${one.source})`).join(', ')}.</Text>
+          )}
+          <Text dimColor wrap="wrap">{'Run /lagoon <project> to set it for this repo.'}</Text>
+          <Box marginTop={1} gap={1}>
+            {suggestions.length > 0 && <Button key="choose" label="Choose project" hotkey="p" onPress={() => ask($, suggestions)} />}
+            {refreshButton}
+          </Box>
+          {footer}
+        </Box>
+      )
+    }
     if (found.status !== 'found') {
       return (
         <Box flexDirection="column">
-          {found.status === 'none'
-            ? <Text dimColor wrap="wrap">No .lagoon.yml here, and the git remote matches no Lagoon project.</Text>
-            : <Text color="warning" wrap="wrap">Could not find the Lagoon project: {found.error}</Text>}
+          <Text color="warning" wrap="wrap">Could not find the Lagoon project: {found.error}</Text>
           <Box marginTop={1}>{refreshButton}</Box>
           {footer}
         </Box>
@@ -222,6 +247,7 @@ export const register: Register = (on, options) => {
         <Box gap={1}>
           <Text wrap="truncate-end">
             <Text bold>{found.project}</Text>
+            {found.isChosen && <Text dimColor> (set by /lagoon)</Text>}
             {dashboard !== undefined && <Text> · <Link href={dashboard} label="dashboard" /></Text>}
             {current?.fetchedAt !== undefined && <Text dimColor> · read {elapsed(current.fetchedAt, now)} ago</Text>}
           </Text>
@@ -463,33 +489,180 @@ async function readText($: EngineInterface, path: string): Promise<string | unde
   return (await $.fs.exists(path)) ? $.fs.read(path) : undefined
 }
 
-// .lagoon.yml's `project:` first; else the project whose git URL is origin's.
-// A failed lookup is an error, retried, never taken for "no project".
+// The project, from what proves it, in order: .lagoon.yml's `project:`; the
+// one the person chose for this repo; the one whose git URL is origin's; one
+// the repo's files name whose git URL Lagoon gives as origin's. The files'
+// other names that Lagoon has are only offered. A failed lookup is an error,
+// retried, never taken for "no project".
 async function projectFor($: EngineInterface, root: string, lagoonYml: string | undefined): Promise<LagoonLookup> {
   const named = lagoonYml === undefined ? undefined : projectOf(lagoonYml)
-  if (named !== undefined) return { root, status: 'found', project: named }
+  if (named !== undefined) return { root, status: 'found', project: named, isChosen: false }
+
+  const chosen = await storedChoice($, root)
+  if (chosen !== undefined) return { root, status: 'found', project: chosen, isChosen: true }
 
   const repo = await $.session.repo()
+  const remote = repo?.remote ?? undefined
   // Never the remote as written: it may carry credentials (https://user:token@…).
-  const candidates = repo?.remote == null ? [] : gitUrlCandidates(repo.remote)
-  for (const gitUrl of candidates) {
+  // Lagoon answers a git URL it does not know with an error, not null: one
+  // form failing says nothing of the next.
+  let failure: string | undefined
+  for (const gitUrl of remote === undefined ? [] : gitUrlCandidates(remote)) {
     const ran = await lagoon($, ['raw', '--raw', `{ projectByGitUrl(gitUrl: "${gitUrl}") { name } }`])
     if ('error' in ran) {
-      await noteIdentity($, undefined, ran.error)
-      return { root, status: 'error', error: ran.error }
+      failure ??= ran.error
+      continue
     }
     try {
       const answer = parseRaw(ran.stdout).projectByGitUrl as { name?: unknown } | null | undefined
       if (answer === null) continue
       const name = answer?.name
       return typeof name === 'string' && isProjectName(name)
-        ? { root, status: 'found', project: name }
+        ? { root, status: 'found', project: name, isChosen: false }
         : { root, status: 'error', error: 'unexpected answer to projectByGitUrl' }
     } catch (error) {
       return { root, status: 'error', error: message(error) }
     }
   }
-  return { root, status: 'none' }
+  // Every form failed: only a CLI that answers can say there is no project.
+  if (failure !== undefined) {
+    const ran = await lagoon($, ['raw', '--raw', '{ me { email } }'])
+    if ('error' in ran) {
+      await noteIdentity($, undefined, ran.error)
+      return { root, status: 'error', error: ran.error }
+    }
+  }
+
+  const suggestions: LagoonSuggestion[] = []
+  for (const hint of projectHints(await hintFiles($, root), remote).slice(0, 5)) {
+    const known = await projectNamed($, hint.name)
+    if ('error' in known || known.project === null) continue
+    if (isSameRepo(known.project.gitUrl, remote)) return { root, status: 'found', project: hint.name, isChosen: false }
+    suggestions.push(hint)
+  }
+  return { root, status: 'none', suggestions }
+}
+
+// Files that may name the project: compose and env files at the root, and
+// Drush site aliases (drush/sites, at the root or in an app: apps/cms/drush/sites).
+const HINT_FILES = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml', '.env', '.lagoon.env']
+const UNSEARCHED = new Set(['node_modules', 'vendor'])
+
+async function hintFiles($: EngineInterface, root: string): Promise<{ path: string; text: string }[]> {
+  const paths = HINT_FILES.map(name => `${root}/${name}`)
+  let level = [root]
+  for (let depth = 0; depth <= 2 && level.length > 0; depth += 1) {
+    const below: string[] = []
+    for (const dir of level) {
+      const entries = await listDir($, dir)
+      if (entries.some(one => one.name === 'drush' && one.kind === 'dir')) {
+        const sites = await listDir($, `${dir}/drush/sites`)
+        paths.push(...sites.filter(one => one.kind === 'file' && one.name.endsWith('.site.yml')).map(one => `${dir}/drush/sites/${one.name}`))
+      }
+      below.push(...entries.filter(one => one.kind === 'dir' && !one.name.startsWith('.') && !UNSEARCHED.has(one.name)).map(one => `${dir}/${one.name}`))
+    }
+    level = below.slice(0, 100)
+  }
+  const files: { path: string; text: string }[] = []
+  for (const path of paths) {
+    const text = await readText($, path).catch(() => undefined)
+    if (text !== undefined) files.push({ path, text })
+  }
+  return files
+}
+
+async function listDir($: EngineInterface, path: string) {
+  return $.fs.list(path).catch(() => [])
+}
+
+// Whether Lagoon has the project for this user, with the git URL it builds from.
+async function projectNamed($: EngineInterface, name: string): Promise<{ project: { gitUrl: string | undefined } | null } | { error: string }> {
+  if (!isProjectName(name)) return { error: 'not a Lagoon project name' }
+  const ran = await lagoon($, ['raw', '--raw', `{ projectByName(name: "${name}") { name gitUrl } }`])
+  if ('error' in ran) return ran
+  try {
+    const answer = parseRaw(ran.stdout).projectByName as { gitUrl?: unknown } | null | undefined
+    if (answer === null) return { project: null }
+    if (typeof answer !== 'object' || answer === undefined) return { error: 'unexpected answer to projectByName' }
+    return { project: { gitUrl: typeof answer.gitUrl === 'string' ? answer.gitUrl : undefined } }
+  } catch (error) {
+    return { error: message(error) }
+  }
+}
+
+// The person's choice is kept per repository (its remote, so every worktree
+// shares it), else per folder.
+async function choiceKey($: EngineInterface, root: string): Promise<string> {
+  const repo = await $.session.repo().catch(() => null)
+  return `project:${repoKey(repo?.remote) ?? root}`
+}
+
+async function storedChoice($: EngineInterface, root: string): Promise<string | undefined> {
+  try {
+    const value = await $.store.get(await choiceKey($, root))
+    return typeof value === 'string' && isProjectName(value) ? value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// The person names the project: checked with Lagoon, then kept for this repo
+// across sessions, and read. A read in flight for the old answer writes nothing.
+async function choose($: EngineInterface, raw: string) {
+  const name = asProjectName(raw)
+  if (name === undefined) {
+    $.ui.toast(`Lagoon: "${raw.slice(0, 64)}" is not a project name`)
+    return
+  }
+  const known = await projectNamed($, name)
+  if ('error' in known) {
+    $.ui.toast(`Lagoon: could not check "${name}": ${known.error}`)
+    return
+  }
+  if (known.project === null) {
+    $.ui.toast(`Lagoon: no project "${name}" (or no access)`)
+    return
+  }
+  const root = await $.session.root()
+  await $.store.set(await choiceKey($, root), name)
+  generation += 1
+  const chosen: LagoonLookup = { root, status: 'found', project: name, isChosen: true }
+  await update($, lookup, () => chosen)
+  await refresh($)
+}
+
+async function forget($: EngineInterface) {
+  const root = await $.session.root()
+  await $.store.delete(await choiceKey($, root)).catch(() => undefined)
+  generation += 1
+  const pending: LagoonLookup = { root, status: 'pending' }
+  await update($, lookup, () => pending)
+  await refresh($)
+}
+
+const NONE_OF_THESE = 'None of these'
+
+// Asks which project it is, offering the names the repo's files suggest; a
+// name typed under "Other" is checked like any other.
+async function ask($: EngineInterface, suggestions: readonly LagoonSuggestion[]) {
+  let answer: string
+  try {
+    answer = await $.ui.ask('Which Lagoon project does this repo deploy to?', {
+      header: 'Lagoon',
+      options: [...suggestions.slice(0, 3).map(one => one.name), NONE_OF_THESE],
+    })
+  } catch {
+    // Dismissed, or nobody to ask.
+    return
+  }
+  if (answer !== NONE_OF_THESE) await choose($, answer)
+}
+
+// `/lagoon` on a repo whose project the files only suggest asks at once.
+async function refreshAndAsk($: EngineInterface) {
+  await refresh($)
+  const found = await read($, lookup)
+  if (found?.status === 'none' && found.suggestions.length > 0) await ask($, found.suggestions)
 }
 
 type ProjectRead = { fresh: LagoonSnapshot; email: string | undefined; cliError: string | undefined }

@@ -2,7 +2,7 @@
 
 Claude Code mod that shows the [Lagoon](https://lagoon.sh) environments of the current project: builds, build logs, services, and the platform's status.
 
-Run `/lagoon` to open the pane. Requires the [`lagoon`](https://github.com/uselagoon/lagoon-cli) CLI, logged in.
+Run `/lagoon` to open the pane; `/lagoon <project>` sets the Lagoon project when the repo does not say it. Requires the [`lagoon`](https://github.com/uselagoon/lagoon-cli) CLI, logged in.
 
 ## Install
 
